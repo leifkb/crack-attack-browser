@@ -51,7 +51,9 @@ interface EngineHarness {
   resolvingChain: boolean;
   backgroundFallUntil: number;
   dangerMs: number;
+  elapsedMs: number;
   lastUpdate: number;
+  rise: number;
   score: number;
   startClear(
     matches: Coordinate[],
@@ -328,6 +330,133 @@ test("solo scoring preserves the original three-block and gray values", () => {
   assert.equal(baseScoreFor(5, true), 15);
 });
 
+test("a simultaneous gray line supersedes colored points like the original", () => {
+  const engine = new CrackAttackEngine({ seed: 0x606165 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  for (let x = 0; x < 3; x += 1) board[1][x] = block(700 + x, 1);
+  for (let x = 3; x < 6; x += 1) board[3][x] = block(710 + x, 5);
+  const matches = findMatches(board);
+
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.startClear(matches.coordinates, false, 1000, matches.patterns);
+
+  assert.equal(
+    engine.getSnapshot(1000).score,
+    baseScoreFor(3, true),
+    "Score::reportElimination ignores the colored magnitude when gray is present",
+  );
+});
+
+test("the initial stack never starts with equal orthogonal neighbors", () => {
+  const board = new CrackAttackEngine({ seed: 1 }).getSnapshot(0).board;
+
+  for (let y = 0; y < VISIBLE_ROWS; y += 1) {
+    for (let x = 0; x < BOARD_COLUMNS; x += 1) {
+      const cell = board[y][x];
+      if (cell?.kind !== "block") continue;
+      for (const [dx, dy] of [[1, 0], [0, 1]]) {
+        const neighbor = board[y + dy]?.[x + dx];
+        if (neighbor?.kind !== "block") continue;
+        assert.notEqual(
+          cell.flavor,
+          neighbor.flavor,
+          `initial neighbors at ${x},${y} and ${x + dx},${y + dy} differ`,
+        );
+      }
+    }
+  }
+});
+
+test("an ordinary swap does not pause the upward creep", () => {
+  const engine = new CrackAttackEngine({ seed: 0x515253 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  board[0][2] = block(800, 2);
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.elapsedMs = 0;
+  internals.lastUpdate = 1000;
+  internals.rise = 0.25;
+
+  engine.setCursor(2, 0, 1000);
+  assert.equal(engine.swap(1000), true);
+  engine.update(1020);
+
+  assert.ok(
+    engine.getSnapshot(1020).rise > 0.25,
+    "Creep::timeStep keeps running while Swapper::timeStep animates",
+  );
+});
+
+test("a creep rollover carries an active swap without a visual jump", () => {
+  const engine = new CrackAttackEngine({ seed: 0x545556 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  board[0][2] = block(850, 2);
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.elapsedMs = 0;
+  internals.lastUpdate = 1000;
+  internals.rise = 0.9999;
+
+  engine.setCursor(2, 0, 1000);
+  assert.equal(engine.swap(1000), true);
+  engine.update(1020);
+
+  const snapshot = engine.getSnapshot(1020);
+  const moving = snapshot.board[1][3] as BlockCell;
+  assert.equal(moving.id, 850, "the logical swap target rises with the board");
+  assert.equal(
+    moving.animationFromY,
+    1,
+    "the interpolation origin rises too, preserving the rendered position",
+  );
+  assert.equal(snapshot.phase, "swapping");
+});
+
+test("falling alone does not pause the game-over clock", () => {
+  const engine = new CrackAttackEngine({ seed: 0x616263 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  for (let y = 0; y < VISIBLE_ROWS; y += 1) {
+    board[y][BOARD_COLUMNS - 1] = block(900 + y, (y % 2) as BlockFlavor);
+  }
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.backgroundFallUntil = 2000;
+  internals.dangerMs = 1000;
+  internals.lastUpdate = 1000;
+
+  engine.update(1020);
+  assert.equal(
+    engine.getSnapshot(1020).dangerMs,
+    1020,
+    "only dying or awakening pieces freeze Creep::loss_alarm",
+  );
+});
+
+test("a slow frame catches up all original simulation time", () => {
+  const engine = new CrackAttackEngine({ seed: 0x717273 });
+  const internals = harness(engine);
+  internals.board = createEmptyBoard();
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.elapsedMs = 0;
+  internals.lastUpdate = 1000;
+  internals.rise = 0;
+
+  engine.update(1200);
+  const snapshot = engine.getSnapshot(1200);
+  assert.equal(snapshot.elapsedMs, 200);
+  assert.ok(Math.abs(snapshot.rise - (20 / 1440) * 0.2) < 1e-9);
+});
+
 test("occupied level lights fade from blue through purple on the original cadence", () => {
   const engine = new CrackAttackEngine({ seed: 0x565656 });
   const ready = engine.getSnapshot(0);
@@ -379,7 +508,7 @@ test("a breaking line restores the original one-second danger grace", () => {
   assert.equal(snapshot.status, "playing");
   assert.equal(
     snapshot.dangerMs,
-    DANGER_HIGH_ALERT_MS + 50,
+    DANGER_HIGH_ALERT_MS + 20,
     "the clock resumes from the restored grace after the last dying block is gone",
   );
 });
