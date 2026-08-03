@@ -24,6 +24,11 @@ export const CURSOR_MOVE_DURATION_MS = 120;
 // Crack Attack advances at 50 Hz and keeps dying blocks alive for 90 ticks.
 export const BLOCK_CLEAR_DURATION_MS = 90 * 20;
 export const DANGER_LOSS_DELAY_MS = 7000;
+// Crack Attack 1.1.14 restores the loss alarm to one second whenever dying
+// or awakening pieces pause it. This is also the low/high-alert bar boundary.
+export const DANGER_ELIMINATION_GRACE_MS = 1000;
+export const DANGER_HIGH_ALERT_MS =
+  DANGER_LOSS_DELAY_MS - DANGER_ELIMINATION_GRACE_MS;
 export const REWARD_SIGN_LIFETIME_MS = 1650;
 export const DEATH_SPARK_GRAVITY = 1.8;
 export const LEVEL_LIGHT_FADE_MS = 3000;
@@ -545,10 +550,18 @@ export class CrackAttackEngine {
     const topRow = this.topOccupiedRow();
     const inDanger = topRow >= VISIBLE_ROWS - 1;
     const awakening = this.awakeningCount();
-    const resolutionActive = this.hasActiveClears()
+    const eliminationActive = this.hasActiveClears() || awakening > 0;
+    const resolutionActive = eliminationActive
       || this.backgroundFallUntil > now
-      || this.phase === "falling"
-      || awakening > 0;
+      || this.phase === "falling";
+
+    // Original Creep::timeStep raises a high-alert loss alarm back to
+    // GC_LOSS_DELAY_ELIMINATION while any blocks are dying or awakening. Our
+    // timer counts upward, so the equivalent operation is a clamp to the
+    // purple/red boundary, preserving a full second when play resumes.
+    if (inDanger && eliminationActive && this.dangerMs > DANGER_HIGH_ALERT_MS) {
+      this.dangerMs = DANGER_HIGH_ALERT_MS;
+    }
 
     if (inDanger && !resolutionActive) {
       this.dangerMs += delta;

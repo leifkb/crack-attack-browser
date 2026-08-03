@@ -8,7 +8,10 @@ import {
   BLOCK_CLEAR_DURATION_MS,
   BOARD_COLUMNS,
   CrackAttackEngine,
+  DANGER_HIGH_ALERT_MS,
+  DANGER_LOSS_DELAY_MS,
   LEVEL_LIGHT_FADE_MS,
+  VISIBLE_ROWS,
   baseScoreFor,
   createEmptyBoard,
   findMatchCoordinates,
@@ -47,6 +50,8 @@ interface EngineHarness {
   chainBaseScore: number;
   resolvingChain: boolean;
   backgroundFallUntil: number;
+  dangerMs: number;
+  lastUpdate: number;
   score: number;
   startClear(
     matches: Coordinate[],
@@ -339,6 +344,79 @@ test("occupied level lights fade from blue through purple on the original cadenc
   const complete = engine.getSnapshot(100 + LEVEL_LIGHT_FADE_MS);
   assert.equal(complete.levelLightBlends[0], 1);
   assert.equal(complete.levelLightBlends[complete.topOccupiedRow], 1);
+});
+
+test("a breaking line restores the original one-second danger grace", () => {
+  const engine = new CrackAttackEngine({ seed: 0xdadada });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+
+  // Keep the stack over the safe-height boundary after the unrelated triple
+  // disappears, so the danger timer has to resume instead of clearing.
+  for (let y = 0; y < VISIBLE_ROWS; y += 1) {
+    board[y][BOARD_COLUMNS - 1] = block(300 + y, (y % 2) as BlockFlavor);
+  }
+  for (let x = 0; x < 3; x += 1) board[0][x] = block(400 + x, 3);
+
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.dangerMs = DANGER_LOSS_DELAY_MS - 250;
+  internals.lastUpdate = 1000;
+  internals.startClear([{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }], false, 1000);
+
+  engine.update(1020);
+  let snapshot = engine.getSnapshot(1020);
+  assert.equal(snapshot.status, "playing");
+  assert.equal(
+    snapshot.dangerMs,
+    DANGER_HIGH_ALERT_MS,
+    "breaking blocks pull a red loss clock back to the purple/red boundary",
+  );
+
+  engine.update(1000 + BLOCK_CLEAR_DURATION_MS);
+  snapshot = engine.getSnapshot(1000 + BLOCK_CLEAR_DURATION_MS);
+  assert.equal(snapshot.status, "playing");
+  assert.equal(
+    snapshot.dangerMs,
+    DANGER_HIGH_ALERT_MS + 50,
+    "the clock resumes from the restored grace after the last dying block is gone",
+  );
+});
+
+test("garbage awakening restores danger grace without moving an earlier warning", () => {
+  const engine = new CrackAttackEngine({ seed: 0xbababa });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+
+  for (let y = 0; y < VISIBLE_ROWS; y += 1) {
+    board[y][BOARD_COLUMNS - 1] = block(500 + y, (y % 2) as BlockFlavor);
+  }
+  const awakeningGarbage = garbage(600, 60);
+  awakeningGarbage.state = "awakening";
+  awakeningGarbage.awakenRevealAt = 1000;
+  awakeningGarbage.awakenReleaseAt = 5000;
+  board[2][0] = awakeningGarbage;
+
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.lastUpdate = 1000;
+  internals.dangerMs = DANGER_HIGH_ALERT_MS - 500;
+  engine.update(1020);
+  assert.equal(
+    engine.getSnapshot(1020).dangerMs,
+    DANGER_HIGH_ALERT_MS - 500,
+    "the original only resets a clock that has entered high alert",
+  );
+
+  internals.dangerMs = DANGER_LOSS_DELAY_MS - 100;
+  engine.update(1040);
+  assert.equal(
+    engine.getSnapshot(1040).dangerMs,
+    DANGER_HIGH_ALERT_MS,
+    "the garbage reveal restores the full one-second loss grace",
+  );
 });
 
 test("large clears are converted into bounded garbage pieces", () => {

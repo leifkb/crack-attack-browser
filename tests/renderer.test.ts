@@ -251,8 +251,9 @@ test("level lights share the block grid's row boundaries from bottom to top", ()
 
 test("the lose bar advances from blue through purple to red", () => {
   const safe = loseBarVisual(0);
-  const warning = loseBarVisual(2500);
-  const critical = loseBarVisual(6000);
+  const warning = loseBarVisual(3000);
+  const purpleEdge = loseBarVisual(5999);
+  const critical = loseBarVisual(6500);
   const lost = loseBarVisual(7000);
 
   assert.equal(safe.phase, "safe");
@@ -261,6 +262,7 @@ test("the lose bar advances from blue through purple to red", () => {
   assert.equal(warning.phase, "warning");
   assert.equal(warning.progress, 0.5);
   assert.deepEqual(warning.leading, [0.64, 0, 0.64]);
+  assert.equal(purpleEdge.phase, "warning", "purple lasts until one second before loss");
   assert.equal(critical.phase, "critical");
   assert.equal(critical.progress, 0.5);
   assert.deepEqual(critical.leading, [0.8, 0, 0]);

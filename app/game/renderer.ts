@@ -10,6 +10,7 @@ import {
   AWAKEN_POP_DURATION_MS,
   BOARD_COLUMNS,
   DEATH_SPARK_GRAVITY,
+  DANGER_HIGH_ALERT_MS,
   DANGER_LOSS_DELAY_MS,
   REWARD_SIGN_LIFETIME_MS,
   VISIBLE_ROWS,
@@ -623,7 +624,7 @@ function drawLoseBar(context: CanvasRenderingContext2D, dangerMs: number): void 
   const y = 526;
   const width = 216;
   const height = 22;
-  const visual = loseBarVisual(dangerMs, DANGER_LOSS_DELAY_MS);
+  const visual = loseBarVisual(dangerMs, DANGER_LOSS_DELAY_MS, DANGER_HIGH_ALERT_MS);
 
   context.save();
   roundedRect(context, x, y, width, height, height / 2);

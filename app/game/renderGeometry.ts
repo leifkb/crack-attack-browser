@@ -267,8 +267,12 @@ export function loseBarToneAt(verticalPosition: number): LoseBarTone {
   };
 }
 
-export function loseBarVisual(dangerMs: number, lossDelayMs = 7000): LoseBarVisual {
-  const highAlertMs = Math.max(0, lossDelayMs - 2000);
+export function loseBarVisual(
+  dangerMs: number,
+  lossDelayMs = 7000,
+  highAlertMs = lossDelayMs - 1000,
+): LoseBarVisual {
+  const highAlertBoundaryMs = clamp(highAlertMs, 0, lossDelayMs);
   if (dangerMs <= 0) {
     return {
       phase: "safe",
@@ -277,17 +281,19 @@ export function loseBarVisual(dangerMs: number, lossDelayMs = 7000): LoseBarVisu
       trailing: LOSE_BAR_BLUE,
     };
   }
-  if (dangerMs < highAlertMs) {
+  if (dangerMs < highAlertBoundaryMs) {
     return {
       phase: "warning",
-      progress: clamp(dangerMs / highAlertMs),
+      progress: clamp(dangerMs / highAlertBoundaryMs),
       leading: LOSE_BAR_PURPLE,
       trailing: LOSE_BAR_BLUE,
     };
   }
   return {
     phase: "critical",
-    progress: clamp((dangerMs - highAlertMs) / (lossDelayMs - highAlertMs)),
+    progress: clamp(
+      (dangerMs - highAlertBoundaryMs) / (lossDelayMs - highAlertBoundaryMs),
+    ),
     leading: LOSE_BAR_RED,
     trailing: LOSE_BAR_PURPLE,
   };
