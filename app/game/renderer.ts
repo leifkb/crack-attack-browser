@@ -26,6 +26,7 @@ import {
 import { BlockWebGLLayer } from "./blockWebGL";
 import { scoreToBeat } from "./highScore";
 import {
+  creepRowBlockMaterial,
   countdownVisual,
   createGarbageMesh,
   formatSoloScore,
@@ -91,6 +92,7 @@ const BLOCK_COLORS: Color3[] = [
   [1, 0.4, 0],
   [0.4, 0.4, 0.4],
 ];
+const CREEP_ROW_BLOCK_MATERIALS = BLOCK_COLORS.map(creepRowBlockMaterial);
 
 const GARBAGE_COLORS: Record<"normal" | "gray", Color3> = {
   normal: [1, 0, 0],
@@ -937,13 +939,14 @@ function awakeningRotation(sequence: number, remaining: number): {
 
 function blockVisual(cell: BlockCell, now: number, dimmed: boolean): BlockVisual {
   let scale = 1;
-  const alpha = dimmed ? 0.28 : 1;
+  const material = dimmed ? CREEP_ROW_BLOCK_MATERIALS[cell.flavor] : null;
+  const alpha = material?.alpha ?? 1;
   let rotateX = 0;
   let rotateY = 0;
   const rotateZ = 0;
   let spinAxis: Vector3 | undefined;
   let spinAngle = 0;
-  let color = BLOCK_COLORS[cell.flavor];
+  let color = material?.color ?? BLOCK_COLORS[cell.flavor];
 
   if (cell.state === "clearing" && cell.clearStarted !== undefined && cell.clearUntil !== undefined) {
     const progress = clamp((now - cell.clearStarted) / (cell.clearUntil - cell.clearStarted));
