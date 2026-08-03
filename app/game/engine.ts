@@ -34,6 +34,9 @@ export const DEATH_SPARK_GRAVITY = 1.8;
 export const LEVEL_LIGHT_FADE_MS = 3000;
 export const GARBAGE_ROW_REFORM_CHANCE = 0.5;
 const SWAP_DURATION_MS = 125;
+// The original simulation consumes every elapsed 20 ms tick. Rendering may
+// skip frames, but gameplay time is never discarded when a frame is late.
+const SIMULATION_STEP_MS = 20;
 // Original 50 Hz timing: three ticks hanging, then three ticks per row.
 const FALL_HANG_MS = 60;
 const FALL_ROW_MS = 60;
@@ -519,7 +522,7 @@ export class CrackAttackEngine {
 
   update(now: number): void {
     if (this.lastUpdate === 0) this.lastUpdate = now;
-    const delta = Math.min(50, Math.max(0, now - this.lastUpdate));
+    const previousUpdate = this.lastUpdate;
     this.lastUpdate = now;
 
     if (this.status === "countdown") {
@@ -531,6 +534,27 @@ export class CrackAttackEngine {
     }
 
     if (this.status !== "playing") return;
+
+    // Game::idlePlay retains all unprocessed wall-clock time and advances the
+    // original game in fixed 20 ms ticks. Do the same here so a busy render
+    // frame cannot silently slow the creep or extend the loss grace period.
+    const elapsed = Math.max(0, now - previousUpdate);
+    if (elapsed === 0) {
+      this.updatePlaying(now, 0);
+      return;
+    }
+
+    let stepNow = previousUpdate;
+    let remaining = elapsed;
+    while (remaining > 0 && this.status === "playing") {
+      const delta = Math.min(SIMULATION_STEP_MS, remaining);
+      stepNow += delta;
+      remaining -= delta;
+      this.updatePlaying(stepNow, delta);
+    }
+  }
+
+  private updatePlaying(now: number, delta: number): void {
     this.elapsedMs += delta;
     this.pruneEffects(now);
 
@@ -551,9 +575,6 @@ export class CrackAttackEngine {
     const inDanger = topRow >= VISIBLE_ROWS - 1;
     const awakening = this.awakeningCount();
     const eliminationActive = this.hasActiveClears() || awakening > 0;
-    const resolutionActive = eliminationActive
-      || this.backgroundFallUntil > now
-      || this.phase === "falling";
 
     // Original Creep::timeStep raises a high-alert loss alarm back to
     // GC_LOSS_DELAY_ELIMINATION while any blocks are dying or awakening. Our
@@ -563,7 +584,7 @@ export class CrackAttackEngine {
       this.dangerMs = DANGER_HIGH_ALERT_MS;
     }
 
-    if (inDanger && !resolutionActive) {
+    if (inDanger && !eliminationActive) {
       this.dangerMs += delta;
       if (!this.wasInDanger) this.events.push({ type: "danger" });
       if (this.dangerMs >= DANGER_LOSS_DELAY_MS) {
@@ -575,7 +596,42 @@ export class CrackAttackEngine {
     }
     this.wasInDanger = inDanger;
 
-    if (this.phase === "idle" && awakening === 0) {
+    // Creep::timeStep only returns early for a safe-height violation or while
+    // blocks are dying/awakening. Swaps, ordinary falls, and garbage drops all
+    // continue alongside the upward pressure.
+    if (!inDanger && !eliminationActive) {
+      const normalStep = Math.min(2400, 20 + 20 * Math.floor(this.elapsedMs / 10000));
+      const normalRowsPerSecond = normalStep / 1440;
+      const manualRaiseActive = this.raiseHeld || this.raiseToRowBoundary;
+      const rowsPerSecond = manualRaiseActive ? 2.5 : normalRowsPerSecond;
+      const riseDelta = rowsPerSecond * (delta / 1000);
+
+      // Releasing Raise commits the already-started movement through the next
+      // complete row. Cap that final step at the wrap point so a quick tap never
+      // leaves the stack (or cursor) parked at a fractional manual offset.
+      if (this.raiseToRowBoundary && !this.raiseHeld) {
+        this.rise = Math.min(1, this.rise + riseDelta);
+      } else {
+        this.rise += riseDelta;
+      }
+
+      while (
+        this.rise >= 1
+        && this.status === "playing"
+        && !this.hasActiveClears()
+        && this.awakeningCount() === 0
+      ) {
+        this.rise -= 1;
+        this.insertCreepRow(now);
+        if (this.raiseToRowBoundary && !this.raiseHeld) {
+          this.raiseToRowBoundary = false;
+          this.rise = 0;
+        }
+      }
+    }
+
+    // The original updates Creep before GarbageGenerator on each tick.
+    if (this.phase === "idle" && this.awakeningCount() === 0) {
       const dueIndex = this.queuedAttacks.findIndex((attack) => attack.dropAt <= now);
       if (dueIndex >= 0) {
         const [attack] = this.queuedAttacks.splice(dueIndex, 1);
@@ -584,33 +640,6 @@ export class CrackAttackEngine {
           this.queuedAttacks.push(attack);
           this.sortAttackQueue();
         }
-        return;
-      }
-    }
-
-    if (this.phase !== "idle" || inDanger || awakening > 0) return;
-
-    const normalStep = Math.min(2400, 20 + 20 * Math.floor(this.elapsedMs / 10000));
-    const normalRowsPerSecond = normalStep / 1440;
-    const manualRaiseActive = this.raiseHeld || this.raiseToRowBoundary;
-    const rowsPerSecond = manualRaiseActive ? 2.5 : normalRowsPerSecond;
-    const riseDelta = rowsPerSecond * (delta / 1000);
-
-    // Releasing Raise commits the already-started movement through the next
-    // complete row. Cap that final step at the wrap point so a quick tap never
-    // leaves the stack (or cursor) parked at a fractional manual offset.
-    if (this.raiseToRowBoundary && !this.raiseHeld) {
-      this.rise = Math.min(1, this.rise + riseDelta);
-    } else {
-      this.rise += riseDelta;
-    }
-
-    while (this.rise >= 1 && this.status === "playing" && this.phase === "idle") {
-      this.rise -= 1;
-      this.insertCreepRow(now);
-      if (this.raiseToRowBoundary && !this.raiseHeld) {
-        this.raiseToRowBoundary = false;
-        this.rise = 0;
       }
     }
   }
@@ -978,7 +1007,11 @@ export class CrackAttackEngine {
       combo.id,
     );
 
-    const base = baseScoreFor(normalMagnitude) + baseScoreFor(grayMagnitude, true);
+    // Score::reportElimination gives a mixed elimination its gray value only;
+    // colored magnitude is deliberately ignored when special magnitude exists.
+    const base = grayMagnitude > 0
+      ? baseScoreFor(grayMagnitude, true)
+      : baseScoreFor(normalMagnitude);
     const priorBase = combo.baseAccumulatedScore;
     const gain = base * combo.multiplier + priorBase * multiplierIncrements;
     combo.baseAccumulatedScore += base;
@@ -1709,6 +1742,18 @@ export class CrackAttackEngine {
       this.finishGame(now);
       return;
     }
+
+    // Grid::shiftGridUp moves active pieces and their animations together.
+    // Shifting an interpolation's origin with its logical destination avoids
+    // a one-row visual jump when creep wraps during a swap or fall.
+    for (let y = 0; y < this.board.length; y += 1) {
+      for (let x = 0; x < BOARD_COLUMNS; x += 1) {
+        const cell = this.board[y][x];
+        if (this.cellIsMoving(cell, now) && cell.animationFromY !== undefined) {
+          cell.animationFromY += 1;
+        }
+      }
+    }
     this.board.unshift(this.nextRow);
     // The board and the swapper share the creep offset in the original. When
     // that offset wraps, both logical grid coordinates advance together; it
@@ -1772,10 +1817,19 @@ export class CrackAttackEngine {
 
   private generateInitialStack(): void {
     const shortColumn = Math.floor(this.random() * BOARD_COLUMNS);
-    for (let x = 0; x < BOARD_COLUMNS; x += 1) {
+    // Grid::gameStart builds right-to-left and top-to-bottom, rejecting the
+    // color directly above or to the right. Consequently the original board
+    // starts without any equal orthogonal pair—not merely without triples.
+    for (let x = BOARD_COLUMNS - 1; x >= 0; x -= 1) {
       const height = (x === shortColumn ? 1 : 6) + Math.floor(this.random() * 2);
-      for (let y = 0; y < height; y += 1) {
-        const flavor = this.pickSafeFlavor(x, y, false);
+      for (let y = height - 1; y >= 0; y -= 1) {
+        let flavor = this.randomNormalFlavor();
+        while (
+          (this.board[y + 1]?.[x] as BlockCell | null)?.flavor === flavor
+          || (this.board[y]?.[x + 1] as BlockCell | null)?.flavor === flavor
+        ) {
+          flavor = this.randomNormalFlavor();
+        }
         this.board[y][x] = this.createBlock(flavor);
       }
     }
@@ -1793,21 +1847,6 @@ export class CrackAttackEngine {
       row[x] = this.createBlock(flavor);
     }
     return row;
-  }
-
-  private pickSafeFlavor(x: number, y: number, allowGray: boolean): BlockFlavor {
-    const maximum = allowGray ? NORMAL_FLAVOR_COUNT + 1 : NORMAL_FLAVOR_COUNT;
-    for (let attempt = 0; attempt < 40; attempt += 1) {
-      const flavor = Math.floor(this.random() * maximum) as BlockFlavor;
-      const horizontal = x >= 2
-        && (this.board[y][x - 1] as BlockCell | null)?.flavor === flavor
-        && (this.board[y][x - 2] as BlockCell | null)?.flavor === flavor;
-      const vertical = y >= 2
-        && (this.board[y - 1][x] as BlockCell | null)?.flavor === flavor
-        && (this.board[y - 2][x] as BlockCell | null)?.flavor === flavor;
-      if (!horizontal && !vertical) return flavor;
-    }
-    return 0;
   }
 
   private pickSafeFlavorForRow(
