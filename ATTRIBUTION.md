@@ -1,0 +1,17 @@
+# Attribution
+
+Crack Attack! is Copyright (C) 2000-2006 by Daniel R. Nelson, R. Andrew
+Sayman, Kevin Webb, Stephan Beyer, Dennis Lubert, Wolfgang Klier, Till
+Schuberth, Bjørn Lindeijer, and other contributors.
+
+This browser derivative uses gameplay behavior studied from Crack Attack!
+1.1.15-cvs at upstream commit
+`a39f5d1009bb4a25d0115d20a60e3d9d84b0072c`. It redistributes original logo,
+garbage, message, countdown, sign, block-mesh, and font-derived artwork in
+browser-compatible formats.
+
+The original source is available at:
+https://github.com/gnu-lorien/crack-attack
+
+The derivative is licensed under the GNU General Public License, version 2 or,
+at your option, any later version. See `COPYING`.
