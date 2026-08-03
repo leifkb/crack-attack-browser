@@ -8,6 +8,7 @@ import {
   screenCenterToWorld,
 } from "../app/game/worldView.ts";
 import {
+  creepRowBlockMaterial,
   countdownVisual,
   createGarbageMesh,
   formatSoloScore,
@@ -55,6 +56,17 @@ test("block camera and point light vary continuously across the shared world", (
   assert.ok(upper.pitch < 0, "higher blocks expose their bottom side");
   assert.ok(onePixelHigher.pitch < lower.pitch, "the camera angle changes continuously during rise");
   assert.ok(lower.lightPosition[1] > upper.lightPosition[1]);
+});
+
+test("the hidden creep row uses an opaque quarter-strength diffuse material", () => {
+  const yellow = creepRowBlockMaterial([0.85, 0.85, 0]);
+
+  assert.deepEqual(yellow.color, [0.2125, 0.2125, 0]);
+  assert.equal(
+    yellow.alpha,
+    1,
+    "opaque geometry keeps neighboring faces from blending into glowing seams",
+  );
 });
 
 test("the fixed light illuminates opposite sides across the board", () => {

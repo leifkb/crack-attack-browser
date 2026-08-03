@@ -32,6 +32,20 @@ function mixColor(from: Color3, to: Color3, amount: number): Color3 {
   ];
 }
 
+export interface BlockMaterialVisual {
+  color: Color3;
+  alpha: number;
+}
+
+export function creepRowBlockMaterial(color: Color3): BlockMaterialVisual {
+  // DrawBlocks.cxx defines creep_colors as 0.25 times each normal block
+  // color. The row remains fully opaque; only its diffuse material changes.
+  return {
+    color: [color[0] * 0.25, color[1] * 0.25, color[2] * 0.25],
+    alpha: 1,
+  };
+}
+
 function subtract(left: Vector3, right: Vector3): Vector3 {
   return [left[0] - right[0], left[1] - right[1], left[2] - right[2]];
 }
