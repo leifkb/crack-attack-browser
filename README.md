@@ -43,7 +43,15 @@ Run the simulation and rendering regression tests with `npm run test:engine`.
 The repository includes a separate, fully static Vite build for GitHub Pages.
 It uses relative URLs so forks and project sites work beneath any repository
 path. Every push to `main` runs the tests and publishes `dist-pages` through
-the workflow in `.github/workflows/pages.yml`.
+the workflow in `.github/workflows/pages.yml`. The repository's Pages source is
+configured as `Deploy from a branch`, using `/ (root)` on `gh-pages`.
+
+Pull requests opened from branches in this repository get an automatic preview
+at `https://leifkb.github.io/crack-attack-browser/pr-preview/pr-N/`, where `N`
+is the pull request number. The workflow posts the link in a sticky pull request
+comment, updates the preview after every push, and removes it when the pull
+request closes. Fork pull requests are validated but are not deployed because
+their workflow tokens are intentionally read-only.
 
 To verify the Pages artifact locally:
 

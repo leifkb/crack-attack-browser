@@ -1,23 +1,24 @@
-name: Deploy GitHub Pages
+name: Build, deploy, and preview GitHub Pages
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, reopened, synchronize, closed]
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
+  pull-requests: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: pages-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   validate:
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -47,24 +48,64 @@ jobs:
       - name: Validate static artifact
         run: npm run validate:pages
 
-      - name: Configure GitHub Pages
-        if: github.event_name != 'pull_request'
-        uses: actions/configure-pages@v5
-
-      - name: Upload GitHub Pages artifact
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-pages-artifact@v4
+      - name: Upload built site
+        uses: actions/upload-artifact@v4
         with:
+          name: pages-build
+          path: dist-pages
+          retention-days: 1
+
+  deploy-production:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Download built site
+        uses: actions/download-artifact@v4
+        with:
+          name: pages-build
           path: dist-pages
 
-  deploy:
-    if: github.event_name != 'pull_request'
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
+      - name: Publish production site
+        # v4.8.0; pinned so an upstream tag move cannot alter this workflow.
+        uses: JamesIves/github-pages-deploy-action@d92aa235d04922e8f08b40ce78cc5442fcfbfa2f
+        with:
+          branch: gh-pages
+          folder: dist-pages
+          clean-exclude: |
+            pr-preview
+          force: false
+          attempt-limit: 6
+
+  deploy-preview:
+    if: >-
+      always() &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.action == 'closed' || needs.validate.result == 'success')
     needs: validate
+    runs-on: ubuntu-latest
     steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Download built site
+        if: github.event.action != 'closed'
+        uses: actions/download-artifact@v4
+        with:
+          name: pages-build
+          path: dist-pages
+
+      - name: Publish or remove pull request preview
+        # v1.8.1; pinned so an upstream tag move cannot alter this workflow.
+        uses: rossjrw/pr-preview-action@ffa7509e91a3ec8dfc2e5536c4d5c1acdf7a6de9
+        with:
+          action: ${{ github.event.action == 'closed' && 'remove' || 'deploy' }}
+          source-dir: dist-pages
+          preview-branch: gh-pages
+          umbrella-dir: pr-preview
+          pages-base-url: leifkb.github.io/crack-attack-browser
+          qr-code: false
