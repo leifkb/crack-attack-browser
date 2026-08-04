@@ -52,6 +52,11 @@ npm run build:pages
 npm run validate:pages
 ```
 
+For a browser-hosted development preview, open the repository or a pull request
+in StackBlitz. The checked-in `.stackblitzrc` automatically starts the static
+Pages entry point with `npm run dev:pages` instead of the Cloudflare development
+runtime used by the main `dev` script.
+
 ## Controls
 
 - Arrow keys or WASD: move cursor

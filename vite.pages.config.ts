@@ -12,6 +12,12 @@ export default defineConfig({
   // domains without knowing the eventual repository name in advance.
   base: "./",
   plugins: [react()],
+  // Browser-hosted development environments proxy the Vite port through a
+  // generated hostname. There are no secrets or server APIs in this static
+  // build, so accepting that ephemeral host is safe for the preview server.
+  server: {
+    allowedHosts: true,
+  },
   build: {
     outDir: resolve(projectRoot, "dist-pages"),
     emptyOutDir: true,
