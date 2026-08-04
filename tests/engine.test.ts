@@ -7,10 +7,14 @@ import {
   AWAKEN_INTERNAL_DELAY_MS,
   BLOCK_CLEAR_DURATION_MS,
   BOARD_COLUMNS,
+  COUNTDOWN_SEGMENT_MS,
+  COUNTDOWN_START_DELAY_MS,
   CrackAttackEngine,
   DANGER_HIGH_ALERT_MS,
   DANGER_LOSS_DELAY_MS,
+  GARBAGE_QUEUE_CAPACITY,
   LEVEL_LIGHT_FADE_MS,
+  SWAP_DURATION_MS,
   VISIBLE_ROWS,
   baseScoreFor,
   createEmptyBoard,
@@ -52,9 +56,12 @@ interface EngineHarness {
   backgroundFallUntil: number;
   dangerMs: number;
   elapsedMs: number;
-  lastUpdate: number;
+  lastUpdate: number | null;
+  simulationRemainderMs: number;
+  phaseUntil: number;
   rise: number;
   score: number;
+  queuedAttacks: Array<AttackPayload & { dropAt: number }>;
   startClear(
     matches: Coordinate[],
     chainStep: boolean,
@@ -103,12 +110,13 @@ test("two triples made by one swap count as one six-block elimination", () => {
   internals.board = board;
   internals.status = "playing";
   internals.phase = "idle";
+  internals.lastUpdate = 1000;
 
   engine.setCursor(2, 1, 1000);
   assert.equal(engine.swap(1000), true);
-  engine.update(1125);
+  engine.update(1000 + SWAP_DURATION_MS);
 
-  const snapshot = engine.getSnapshot(1125);
+  const snapshot = engine.getSnapshot(1000 + SWAP_DURATION_MS);
   assert.equal(snapshot.score, baseScoreFor(6));
   assert.deepEqual(
     engine.drainEvents()
@@ -134,12 +142,13 @@ test("two lines of five made by one swap count as one ten-block elimination", ()
   internals.board = board;
   internals.status = "playing";
   internals.phase = "idle";
+  internals.lastUpdate = 2000;
 
   engine.setCursor(2, 2, 2000);
   assert.equal(engine.swap(2000), true);
-  engine.update(2125);
+  engine.update(2000 + SWAP_DURATION_MS);
 
-  const snapshot = engine.getSnapshot(2125);
+  const snapshot = engine.getSnapshot(2000 + SWAP_DURATION_MS);
   assert.equal(snapshot.score, baseScoreFor(10));
   assert.deepEqual(
     engine.drainEvents()
@@ -287,6 +296,7 @@ test("ordinary triples stay silent while larger clears use compact reward signs"
   tripleInternals.board = tripleBoard;
   tripleInternals.status = "playing";
   tripleInternals.phase = "idle";
+  tripleInternals.lastUpdate = 1000;
   tripleInternals.startClear(triple.coordinates, false, 1000, triple.patterns);
   let snapshot = tripleEngine.getSnapshot(1000);
   assert.equal(snapshot.message, null);
@@ -308,6 +318,7 @@ test("ordinary triples stay silent while larger clears use compact reward signs"
   fourInternals.board = fourBoard;
   fourInternals.status = "playing";
   fourInternals.phase = "idle";
+  fourInternals.lastUpdate = 1000;
   fourInternals.startClear(four.coordinates, false, 1000, four.patterns);
   snapshot = fourEngine.getSnapshot(1000);
   assert.equal(snapshot.message, null);
@@ -457,6 +468,69 @@ test("a slow frame catches up all original simulation time", () => {
   assert.ok(Math.abs(snapshot.rise - (20 / 1440) * 0.2) < 1e-9);
 });
 
+test("sub-tick wall time is retained until a complete original step", () => {
+  const engine = new CrackAttackEngine({ seed: 0x747576 });
+  const internals = harness(engine);
+  internals.board = createEmptyBoard();
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.elapsedMs = 0;
+  internals.lastUpdate = 1000;
+  internals.simulationRemainderMs = 0;
+  internals.rise = 0;
+
+  engine.update(1019);
+  assert.equal(engine.getSnapshot(1019).elapsedMs, 0);
+  assert.equal(internals.simulationRemainderMs, 19);
+
+  engine.update(1020);
+  assert.equal(engine.getSnapshot(1020).elapsedMs, 20);
+  assert.equal(internals.simulationRemainderMs, 0);
+});
+
+test("the opening uses three one-second counts followed by Fight during play", () => {
+  const engine = new CrackAttackEngine({ seed: 0x313233 });
+  engine.start(100);
+
+  assert.deepEqual(
+    [100, 1099, 1100, 2099, 2100].map((now) => engine.getSnapshot(now).countdown),
+    ["3", "3", "2", "2", "1"],
+  );
+
+  engine.update(100 + COUNTDOWN_START_DELAY_MS - 1);
+  assert.equal(engine.getSnapshot(3099).status, "countdown");
+  engine.update(100 + COUNTDOWN_START_DELAY_MS);
+  let snapshot = engine.getSnapshot(3100);
+  assert.equal(snapshot.status, "playing");
+  assert.equal(snapshot.countdown, "GO!");
+  assert.equal(snapshot.elapsedMs, 20, "the boundary tick is the first gameplay step");
+  assert.ok(engine.drainEvents().some((event) => event.type === "start"));
+
+  snapshot = engine.getSnapshot(3100 + COUNTDOWN_SEGMENT_MS - 1);
+  assert.equal(snapshot.countdown, "GO!");
+  assert.equal(engine.getSnapshot(3100 + COUNTDOWN_SEGMENT_MS).countdown, null);
+});
+
+test("pausing the opening preserves the remaining countdown", () => {
+  const engine = new CrackAttackEngine({ seed: 0x343536 });
+  engine.start(100);
+  engine.togglePause(600);
+  assert.equal(engine.getSnapshot(1600).status, "paused");
+
+  engine.togglePause(2100);
+  let snapshot = engine.getSnapshot(2100);
+  assert.equal(snapshot.status, "countdown");
+  assert.equal(snapshot.countdown, "3");
+  assert.ok(Math.abs(snapshot.countdownProgress - 0.5) < 1e-9);
+
+  engine.update(4599);
+  assert.equal(engine.getSnapshot(4599).status, "countdown");
+  engine.update(4600);
+  snapshot = engine.getSnapshot(4600);
+  assert.equal(snapshot.status, "playing");
+  assert.equal(snapshot.countdown, "GO!");
+});
+
 test("occupied level lights fade from blue through purple on the original cadence", () => {
   const engine = new CrackAttackEngine({ seed: 0x565656 });
   const ready = engine.getSnapshot(0);
@@ -579,11 +653,11 @@ test("a legal one-move clear advances the live simulation and awards points", ()
 
   assert.ok(selected, "expected a deterministic seed with a one-swap clear");
   selected.engine.start(100);
-  selected.engine.update(3000);
+  selected.engine.update(100 + COUNTDOWN_START_DELAY_MS);
   selected.engine.setCursor(selected.x, selected.y);
-  assert.equal(selected.engine.swap(3100), true);
-  selected.engine.update(3300);
-  assert.ok(selected.engine.getSnapshot(3300).score > 0);
+  assert.equal(selected.engine.swap(3200), true);
+  selected.engine.update(3400);
+  assert.ok(selected.engine.getSnapshot(3400).score > 0);
 });
 
 test("idle blocks remain swappable while another line is breaking", () => {
@@ -598,6 +672,7 @@ test("idle blocks remain swappable while another line is breaking", () => {
   internals.board = board;
   internals.status = "playing";
   internals.phase = "idle";
+  internals.lastUpdate = 1000;
 
   internals.startClear(
     [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }],
@@ -643,6 +718,7 @@ test("an unrelated line starts breaking immediately without joining an active co
   internals.board = board;
   internals.status = "playing";
   internals.phase = "idle";
+  internals.lastUpdate = 1000;
 
   internals.startClear(
     [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }],
@@ -653,10 +729,10 @@ test("an unrelated line starts breaking immediately without joining an active co
   engine.setCursor(2, 2, 1040);
   assert.equal(engine.swap(1050), true);
 
-  engine.update(1175);
-  let snapshot = engine.getSnapshot(1175);
+  engine.update(1180);
+  let snapshot = engine.getSnapshot(1180);
   assert.equal((snapshot.board[2][3] as BlockCell).state, "clearing");
-  assert.equal((snapshot.board[2][3] as BlockCell).clearStarted, 1175);
+  assert.equal((snapshot.board[2][3] as BlockCell).clearStarted, 1180);
   assert.equal((snapshot.board[0][0] as BlockCell).state, "clearing");
   assert.equal(snapshot.score, 4);
   assert.equal(
@@ -684,6 +760,7 @@ test("ordinary blocks remain swappable while incoming garbage appears", () => {
   internals.board = board;
   internals.status = "playing";
   internals.phase = "idle";
+  internals.lastUpdate = 1000;
 
   assert.equal(internals.dropGarbage({
     height: 1,
@@ -721,6 +798,7 @@ test("a block swapped over a hole falls before an unrelated clear finishes", () 
   internals.board = board;
   internals.status = "playing";
   internals.phase = "idle";
+  internals.lastUpdate = 1000;
 
   internals.startClear(
     [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }],
@@ -730,18 +808,18 @@ test("a block swapped over a hole falls before an unrelated clear finishes", () 
   engine.setCursor(4, 1, 1020);
   assert.equal(engine.swap(1050), true);
 
-  let snapshot = engine.getSnapshot(1174);
+  let snapshot = engine.getSnapshot(1179);
   assert.equal((snapshot.board[1][5] as BlockCell).id, 504);
   assert.equal(snapshot.board[0][5], null, "the block completes its horizontal slide first");
 
-  engine.update(1175);
-  snapshot = engine.getSnapshot(1175);
+  engine.update(1180);
+  snapshot = engine.getSnapshot(1180);
   const falling = snapshot.board[0][5] as BlockCell;
   assert.equal(snapshot.phase, "clearing", "the unrelated breaking line keeps running");
   assert.equal(falling.id, 504);
   assert.equal(snapshot.board[1][5], null);
   assert.equal(falling.animationFromY, 1, "vertical motion starts as soon as the swap ends");
-  assert.equal(falling.animationStarted, 1175);
+  assert.equal(falling.animationStarted, 1180);
   assert.equal(falling.animationDelay, 60, "a new fall keeps the original three-tick hang");
   assert.equal(falling.animationDuration, 120, "a one-row fall takes 60ms after the hang");
 });
@@ -759,6 +837,7 @@ test("a quick swap can fill a falling stack's path and create a combo", () => {
   internals.board = board;
   internals.status = "playing";
   internals.phase = "idle";
+  internals.lastUpdate = 1000;
 
   internals.startClear(
     [{ x: 2, y: 0 }, { x: 2, y: 1 }, { x: 2, y: 2 }],
@@ -788,8 +867,8 @@ test("a quick swap can fill a falling stack's path and create a combo", () => {
   assert.equal((snapshot.board[2][2] as BlockCell).id, 524);
   assert.equal(snapshot.board[0][3], null);
 
-  engine.update(2944);
-  snapshot = engine.getSnapshot(2944);
+  engine.update(2939);
+  snapshot = engine.getSnapshot(2939);
   assert.equal((snapshot.board[0][2] as BlockCell).state, "idle");
   assert.equal(
     engine.drainEvents().filter((event) => event.type === "chain").length,
@@ -797,8 +876,8 @@ test("a quick swap can fill a falling stack's path and create a combo", () => {
     "the line waits for the falling blocks to land",
   );
 
-  engine.update(2945);
-  snapshot = engine.getSnapshot(2945);
+  engine.update(2940);
+  snapshot = engine.getSnapshot(2940);
   assert.equal((snapshot.board[0][2] as BlockCell).state, "clearing");
   assert.equal((snapshot.board[1][2] as BlockCell).state, "clearing");
   assert.equal((snapshot.board[2][2] as BlockCell).state, "clearing");
@@ -828,23 +907,25 @@ test("a support change retargets an in-flight block without a visual jump", () =
   internals.board = board;
   internals.status = "playing";
   internals.phase = "falling";
+  internals.phaseUntil = 1240;
   internals.backgroundFallUntil = 1240;
+  internals.lastUpdate = 1000;
 
   engine.setCursor(2, 0, 1050);
   assert.equal(engine.swap(1060), true);
-  engine.update(1185);
+  engine.update(1180);
 
-  const snapshot = engine.getSnapshot(1185);
+  const snapshot = engine.getSnapshot(1180);
   const retargeted = snapshot.board[0][2] as BlockCell;
   assert.equal(retargeted.id, 531);
-  assert.equal(retargeted.animationStarted, 1185);
+  assert.equal(retargeted.animationStarted, 1180);
   assert.equal(retargeted.animationDelay, 0, "an existing fall does not hang a second time");
   assert.ok(
-    Math.abs((retargeted.animationFromY ?? 0) - 1.6875) < 1e-9,
+    Math.abs((retargeted.animationFromY ?? 0) - 1.75) < 1e-9,
     "the new motion begins at the block's exact visible position",
   );
   assert.ok(
-    Math.abs((retargeted.animationDuration ?? 0) - 101.25) < 1e-9,
+    Math.abs((retargeted.animationDuration ?? 0) - 105) < 1e-9,
     "remaining fall time is proportional to the remaining distance",
   );
 });
@@ -852,29 +933,94 @@ test("a support change retargets an in-flight block without a visual jump", () =
 test("the attack boundary can receive and drop future multiplayer payloads", () => {
   const engine = new CrackAttackEngine({ seed: 42 });
   engine.start(100);
-  engine.update(3000);
+  engine.update(100 + COUNTDOWN_START_DELAY_MS);
   engine.receiveAttack({
     height: 1,
     width: 4,
     flavor: "normal",
     source: "clear",
-    createdAt: 3000,
+    createdAt: 3100,
   });
-  assert.equal(engine.getSnapshot(3000).incomingCount, 1);
+  assert.equal(engine.getSnapshot(3100).incomingCount, 1);
   engine.update(10000);
   const snapshot = engine.getSnapshot(10000);
   assert.equal(snapshot.incomingCount, 0);
   assert.ok(snapshot.board.some((row) => row.some((cell) => cell?.kind === "garbage")));
 });
 
+test("incoming garbage keeps the original bounded, tick-aligned queue", () => {
+  const engine = new CrackAttackEngine({ seed: 0x424344 });
+  const internals = harness(engine);
+  for (let index = 0; index < GARBAGE_QUEUE_CAPACITY + 3; index += 1) {
+    engine.receiveAttack({
+      height: 1,
+      width: 4,
+      flavor: "normal",
+      source: "clear",
+      createdAt: 1000,
+    });
+  }
+
+  assert.equal(internals.queuedAttacks.length, GARBAGE_QUEUE_CAPACITY);
+  for (const attack of internals.queuedAttacks) {
+    const delayInTicks = (attack.dropAt - attack.createdAt) / 20;
+    assert.ok(Number.isInteger(delayInTicks));
+    assert.ok(delayInTicks >= 281 && delayInTicks <= 320);
+  }
+});
+
+test("incoming garbage hangs above the board and falls three ticks per row", () => {
+  const engine = new CrackAttackEngine({ seed: 0x454647 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  for (let x = 0; x < BOARD_COLUMNS; x += 1) board[0][x] = block(9000 + x, 0);
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.lastUpdate = 1000;
+
+  assert.equal(internals.dropGarbage({
+    height: 3,
+    width: BOARD_COLUMNS,
+    flavor: "normal",
+    source: "clear",
+    createdAt: 1000,
+    dropAt: 1000,
+  }, 1000), true);
+
+  const bottom = board[1][0] as GarbageCell;
+  const top = board[3][0] as GarbageCell;
+  assert.equal(bottom.animationFromY, VISIBLE_ROWS + 1);
+  assert.equal(top.animationFromY, VISIBLE_ROWS + 3);
+  assert.equal(bottom.animationDelay, 60);
+  assert.equal(bottom.animationDuration, 60 + 12 * 60);
+  assert.equal(internals.phaseUntil, 1000 + 60 + 12 * 60);
+  assert.equal(engine.getSnapshot(1000).topOccupiedRow, 0, "falling garbage is not effective height");
+  assert.equal(
+    engine.getSnapshot(internals.phaseUntil).topOccupiedRow,
+    3,
+    "garbage becomes effective when it lands",
+  );
+
+  internals.startClear(
+    Array.from({ length: BOARD_COLUMNS }, (_, x) => ({ x, y: 0 })),
+    false,
+    1020,
+  );
+  assert.ok(
+    board[1].every((cell) => cell?.kind === "garbage" && cell.state === "idle"),
+    "a line cannot shatter incoming garbage before its initial fall lands",
+  );
+});
+
 test("holding raise advances complete rows and carries the cursor upward", () => {
   const engine = new CrackAttackEngine({ seed: 7 });
   engine.start(100);
-  engine.update(3000);
-  const initialCursor = engine.getSnapshot(3000).cursorY;
+  engine.update(100 + COUNTDOWN_START_DELAY_MS);
+  const initialCursor = engine.getSnapshot(3100).cursorY;
   engine.setRaiseHeld(true);
   let previousVisualRow = initialCursor;
-  for (let now = 3020; now <= 3820; now += 20) {
+  for (let now = 3120; now <= 3920; now += 20) {
     engine.update(now);
     const frame = engine.getSnapshot(now);
     const visualRow = frame.cursorRenderY + frame.rise;
@@ -885,7 +1031,7 @@ test("holding raise advances complete rows and carries the cursor upward", () =>
     assert.ok(visualRow - previousVisualRow < 0.2, "the cursor remains continuous at rollover");
     previousVisualRow = visualRow;
   }
-  const raised = engine.getSnapshot(3820);
+  const raised = engine.getSnapshot(3920);
   assert.ok(raised.cursorY > initialCursor);
   assert.ok(raised.rise < 1);
 });
@@ -893,18 +1039,18 @@ test("holding raise advances complete rows and carries the cursor upward", () =>
 test("a quick raise tap commits the stack to the next complete row", () => {
   const engine = new CrackAttackEngine({ seed: 11 });
   engine.start(100);
-  engine.update(3000);
-  engine.update(3050);
+  engine.update(100 + COUNTDOWN_START_DELAY_MS);
+  engine.update(3150);
 
-  const before = engine.getSnapshot(3050);
+  const before = engine.getSnapshot(3150);
   assert.ok(before.rise > 0 && before.rise < 1, "normal creep has a fractional offset");
 
   engine.setRaiseHeld(true);
   engine.setRaiseHeld(false);
 
-  let now = 3050;
+  let now = 3150;
   let after = before;
-  while (after.cursorY === before.cursorY && now < 4050) {
+  while (after.cursorY === before.cursorY && now < 4150) {
     now += 20;
     engine.update(now);
     after = engine.getSnapshot(now);
@@ -923,18 +1069,18 @@ test("a quick raise tap commits the stack to the next complete row", () => {
 test("cursor movement glides with the original quadratic timing", () => {
   const engine = new CrackAttackEngine({ seed: 17 });
   engine.start(100);
-  engine.update(3000);
+  engine.update(100 + COUNTDOWN_START_DELAY_MS);
 
-  engine.moveCursor(1, 0, 3000);
-  let snapshot = engine.getSnapshot(3000);
+  engine.moveCursor(1, 0, 3100);
+  let snapshot = engine.getSnapshot(3100);
   assert.equal(snapshot.cursorX, 3, "the logical selection updates immediately");
   assert.equal(snapshot.cursorRenderX, 2, "the rendered cursor begins at its old position");
 
-  snapshot = engine.getSnapshot(3060);
+  snapshot = engine.getSnapshot(3160);
   assert.ok(snapshot.cursorRenderX > 2 && snapshot.cursorRenderX < 3);
   assert.equal(snapshot.cursorRenderX, 2.75);
 
-  snapshot = engine.getSnapshot(3120);
+  snapshot = engine.getSnapshot(3220);
   assert.equal(snapshot.cursorRenderX, 3);
   assert.equal(snapshot.cursorRenderY, 4);
 });
@@ -970,6 +1116,7 @@ test("garbage reveals bottom-to-top and left-to-right on the original cadence", 
   internals.phase = "idle";
 
   const clearStarted = 1000;
+  internals.lastUpdate = clearStarted;
   internals.startClear([{ x: 2, y: 2 }, { x: 3, y: 2 }, { x: 4, y: 2 }], false, clearStarted);
   const plannedFlavors = [
     (board[2][0] as GarbageCell).shatterTargetFlavor,
@@ -1070,6 +1217,7 @@ test("the awakening preview stays fixed, permits planning swaps, then creates a 
   internals.board = board;
   internals.status = "playing";
   internals.phase = "idle";
+  internals.lastUpdate = 1000;
 
   internals.startClear([{ x: 1, y: 2 }, { x: 2, y: 2 }, { x: 3, y: 2 }], false, 1000);
   engine.update(2300);

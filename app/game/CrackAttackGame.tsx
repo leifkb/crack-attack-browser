@@ -155,6 +155,16 @@ function waitForFonts(): Promise<void> {
   return document.fonts.ready.then(() => undefined, () => undefined);
 }
 
+function browserScoreStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    // Some privacy modes deny even reading the localStorage property. A run
+    // should still start and remain fully playable without persistence.
+    return null;
+  }
+}
+
 function paintCanvas(
   canvas: HTMLCanvasElement | null,
   snapshot: GameSnapshot,
@@ -219,20 +229,25 @@ export default function CrackAttackGame() {
       const AudioConstructor = window.AudioContext
         ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (AudioConstructor) {
-        audioRef.current = {
-          context: new AudioConstructor(),
-          enabled: soundEnabled,
-        };
+        try {
+          audioRef.current = {
+            context: new AudioConstructor(),
+            enabled: soundEnabled,
+          };
+        } catch {
+          // Audio is optional; browser/device audio limits must not block play.
+          audioRef.current = null;
+        }
       }
     }
     if (audioRef.current) {
       audioRef.current.enabled = soundEnabled;
-      void audioRef.current.context.resume();
+      void audioRef.current.context.resume().catch(() => undefined);
     }
   }, [soundEnabled]);
 
   useEffect(() => {
-    highScoreRef.current = loadScoreToBeat(window.localStorage);
+    highScoreRef.current = loadScoreToBeat(browserScoreStorage());
     let active = true;
     let revealFrame = 0;
     void Promise.all([
@@ -318,7 +333,7 @@ export default function CrackAttackGame() {
 
       if (current.status === "gameover" && current.score > highScoreRef.current) {
         const nextScoreToBeat = recordScoreToBeat(
-          window.localStorage,
+          browserScoreStorage(),
           highScoreRef.current,
           current.score,
         );
@@ -419,8 +434,10 @@ export default function CrackAttackGame() {
 
   useEffect(() => {
     const onVisibility = () => {
-      if (document.hidden && engine.getSnapshot(performance.now()).status === "playing") {
-        engine.togglePause(performance.now());
+      const now = performance.now();
+      const status = engine.getSnapshot(now).status;
+      if (document.hidden && (status === "playing" || status === "countdown")) {
+        engine.togglePause(now);
       }
     };
     document.addEventListener("visibilitychange", onVisibility);
