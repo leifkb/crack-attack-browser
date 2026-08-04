@@ -32,3 +32,19 @@ test("score to beat persists completed scores above 600", () => {
   assert.equal(recordScoreToBeat(storage, 847, 700), 847);
   assert.equal(storage.value, "847", "a lower later score does not replace the record");
 });
+
+test("denied browser storage never prevents a run or a session record", () => {
+  const denied: ScoreStorage = {
+    getItem() {
+      throw new DOMException("denied", "SecurityError");
+    },
+    setItem() {
+      throw new DOMException("denied", "SecurityError");
+    },
+  };
+
+  assert.equal(loadScoreToBeat(denied), 600);
+  assert.equal(loadScoreToBeat(null), 600);
+  assert.equal(recordScoreToBeat(denied, 600, 901), 901);
+  assert.equal(recordScoreToBeat(null, 600, 902), 902);
+});

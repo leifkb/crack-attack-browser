@@ -21,6 +21,8 @@ export const AWAKEN_INTERNAL_DELAY_MS = 300;
 export const AWAKEN_FINAL_DELAY_MS = 1000;
 export const AWAKEN_POP_DURATION_MS = 240;
 export const CURSOR_MOVE_DURATION_MS = 120;
+export const COUNTDOWN_SEGMENT_MS = 50 * 20;
+export const COUNTDOWN_START_DELAY_MS = 150 * 20;
 // Crack Attack advances at 50 Hz and keeps dying blocks alive for 90 ticks.
 export const BLOCK_CLEAR_DURATION_MS = 90 * 20;
 export const DANGER_LOSS_DELAY_MS = 7000;
@@ -33,7 +35,8 @@ export const REWARD_SIGN_LIFETIME_MS = 1650;
 export const DEATH_SPARK_GRAVITY = 1.8;
 export const LEVEL_LIGHT_FADE_MS = 3000;
 export const GARBAGE_ROW_REFORM_CHANCE = 0.5;
-const SWAP_DURATION_MS = 125;
+export const GARBAGE_QUEUE_CAPACITY = 8;
+export const SWAP_DURATION_MS = 6 * 20;
 // The original simulation consumes every elapsed 20 ms tick. Rendering may
 // skip frames, but gameplay time is never discarded when a frame is late.
 const SIMULATION_STEP_MS = 20;
@@ -86,6 +89,7 @@ export interface GarbageCell extends Motion {
   awakenSource?: GarbageFlavor;
   awakenSequence?: number;
   comboId?: number;
+  initialFallUntil?: number;
 }
 
 export type Cell = BlockCell | GarbageCell;
@@ -199,7 +203,7 @@ export interface GameSnapshot {
   dangerMs: number;
   incomingCount: number;
   nextIncomingMs: number | null;
-  countdown: string | null;
+  countdown: "1" | "2" | "3" | "GO!" | null;
   countdownProgress: number;
   gameOverElapsedMs: number;
   message: string | null;
@@ -415,7 +419,8 @@ export class CrackAttackEngine {
   private backgroundSwapUntil = 0;
   private backgroundSwapCellIds = new Set<number>();
   private backgroundFallUntil = 0;
-  private lastUpdate = 0;
+  private lastUpdate: number | null = null;
+  private simulationRemainderMs = 0;
   private countdownUntil = 0;
   private gameOverAt = 0;
   private score = 0;
@@ -472,7 +477,8 @@ export class CrackAttackEngine {
     this.backgroundSwapUntil = 0;
     this.backgroundSwapCellIds = new Set<number>();
     this.backgroundFallUntil = 0;
-    this.lastUpdate = 0;
+    this.lastUpdate = null;
+    this.simulationRemainderMs = 0;
     this.countdownUntil = 0;
     this.gameOverAt = 0;
     this.score = 0;
@@ -515,42 +521,43 @@ export class CrackAttackEngine {
     if (this.status !== "ready" && this.status !== "gameover") return;
     if (this.status === "gameover") this.reset();
     this.status = "countdown";
-    this.countdownUntil = now + 2650;
+    this.countdownUntil = now + COUNTDOWN_START_DELAY_MS;
     this.lastUpdate = now;
+    this.simulationRemainderMs = 0;
     this.syncLevelLights(now);
   }
 
   update(now: number): void {
-    if (this.lastUpdate === 0) this.lastUpdate = now;
+    if (this.lastUpdate === null) this.lastUpdate = now;
     const previousUpdate = this.lastUpdate;
     this.lastUpdate = now;
 
     if (this.status === "countdown") {
-      if (now >= this.countdownUntil) {
-        this.status = "playing";
-        this.events.push({ type: "start" });
-      }
-      return;
+      if (now < this.countdownUntil) return;
+
+      this.status = "playing";
+      this.events.push({ type: "start" });
+
+      // CountDownManager reaches zero on a 20 ms tick, and the original runs
+      // the first gameplay step on that same tick. Include that boundary tick
+      // plus any complete ticks elapsed since it.
+      this.simulationRemainderMs += SIMULATION_STEP_MS
+        + Math.max(0, now - this.countdownUntil);
+    } else {
+      if (this.status !== "playing") return;
+      this.simulationRemainderMs += Math.max(0, now - previousUpdate);
     }
 
-    if (this.status !== "playing") return;
-
-    // Game::idlePlay retains all unprocessed wall-clock time and advances the
-    // original game in fixed 20 ms ticks. Do the same here so a busy render
-    // frame cannot silently slow the creep or extend the loss grace period.
-    const elapsed = Math.max(0, now - previousUpdate);
-    if (elapsed === 0) {
-      this.updatePlaying(now, 0);
-      return;
-    }
-
-    let stepNow = previousUpdate;
-    let remaining = elapsed;
-    while (remaining > 0 && this.status === "playing") {
-      const delta = Math.min(SIMULATION_STEP_MS, remaining);
-      stepNow += delta;
-      remaining -= delta;
-      this.updatePlaying(stepNow, delta);
+    // Game::idlePlay retains sub-tick wall time and advances gameplay only in
+    // complete 20 ms steps. Rendering remains smooth through absolute-time
+    // interpolation, while simulation deadlines stay on the original cadence.
+    while (
+      this.simulationRemainderMs >= SIMULATION_STEP_MS
+      && this.status === "playing"
+    ) {
+      this.simulationRemainderMs -= SIMULATION_STEP_MS;
+      const stepNow = now - this.simulationRemainderMs;
+      this.updatePlaying(stepNow, SIMULATION_STEP_MS);
     }
   }
 
@@ -571,7 +578,7 @@ export class CrackAttackEngine {
     this.refreshPhase(now);
     if (this.status !== "playing") return;
 
-    const topRow = this.topOccupiedRow();
+    const topRow = this.topOccupiedRow(now);
     const inDanger = topRow >= VISIBLE_ROWS - 1;
     const awakening = this.awakeningCount();
     const eliminationActive = this.hasActiveClears() || awakening > 0;
@@ -636,7 +643,8 @@ export class CrackAttackEngine {
       if (dueIndex >= 0) {
         const [attack] = this.queuedAttacks.splice(dueIndex, 1);
         if (!this.dropGarbage(attack, now)) {
-          attack.dropAt = now + 1000;
+          // GarbageGenerator retries on the tick after its 300-tick alarm.
+          attack.dropAt = now + (300 + 1) * SIMULATION_STEP_MS;
           this.queuedAttacks.push(attack);
           this.sortAttackQueue();
         }
@@ -644,12 +652,12 @@ export class CrackAttackEngine {
     }
   }
 
-  moveCursor(dx: number, dy: number, now = this.lastUpdate): void {
+  moveCursor(dx: number, dy: number, now = this.lastUpdate ?? 0): void {
     if (this.status !== "playing" && this.status !== "countdown") return;
     this.moveCursorTo(this.cursorX + dx, this.cursorY + dy, now);
   }
 
-  setCursor(x: number, y: number, now = this.lastUpdate): void {
+  setCursor(x: number, y: number, now = this.lastUpdate ?? 0): void {
     if (this.status !== "playing" && this.status !== "countdown") return;
     this.moveCursorTo(x, y, now);
   }
@@ -703,8 +711,7 @@ export class CrackAttackEngine {
       this.backgroundSwapUntil = now + SWAP_DURATION_MS;
       this.backgroundSwapCellIds = new Set(
         [left, right]
-          .filter((cell): cell is BlockCell => cell?.kind === "block")
-          .map((cell) => cell.id),
+          .flatMap((cell) => cell?.kind === "block" ? [cell.id] : []),
       );
     } else {
       this.phase = "swapping";
@@ -725,6 +732,11 @@ export class CrackAttackEngine {
 
   togglePause(now: number): void {
     if (this.status === "playing" || this.status === "countdown") {
+      // The desktop controller handles Pause after completing the current
+      // simulation tick. Capture any complete wall-clock ticks up to the input
+      // moment so pausing between animation frames cannot discard game time.
+      this.update(now);
+      if (this.status !== "playing" && this.status !== "countdown") return;
       this.statusBeforePause = this.status;
       this.status = "paused";
       this.pausedAt = now;
@@ -734,14 +746,17 @@ export class CrackAttackEngine {
     }
     if (this.status === "paused") {
       this.shiftTimers(Math.max(0, now - this.pausedAt));
-      this.status = this.statusBeforePause === "countdown" ? "playing" : this.statusBeforePause;
+      this.status = this.statusBeforePause;
       this.lastUpdate = now;
       this.pausedAt = 0;
     }
   }
 
   receiveAttack(attack: AttackPayload): void {
-    const spread = 5600 + Math.floor(this.random() * 800);
+    if (this.queuedAttacks.length >= GARBAGE_QUEUE_CAPACITY) return;
+    // determineDropTime uses 280..319 ticks, and timeStep drops only after
+    // that alarm, producing an exact 281..320 tick delay.
+    const spread = (281 + Math.floor(this.random() * 40)) * SIMULATION_STEP_MS;
     this.queuedAttacks.push({ ...attack, dropAt: attack.createdAt + spread });
     this.sortAttackQueue();
   }
@@ -754,23 +769,31 @@ export class CrackAttackEngine {
 
   getSnapshot(now: number): GameSnapshot {
     const visualNow = this.status === "paused" ? this.pausedAt : now;
-    let countdown: string | null = null;
+    let countdown: GameSnapshot["countdown"] = null;
     let countdownProgress = 0;
     if (this.status === "countdown") {
-      const remaining = this.countdownUntil - visualNow;
-      if (remaining > 1950) {
+      const elapsed = Math.max(
+        0,
+        visualNow - (this.countdownUntil - COUNTDOWN_START_DELAY_MS),
+      );
+      if (elapsed < COUNTDOWN_SEGMENT_MS) {
         countdown = "3";
-        countdownProgress = (2650 - remaining) / 700;
-      } else if (remaining > 1250) {
+        countdownProgress = elapsed / COUNTDOWN_SEGMENT_MS;
+      } else if (elapsed < COUNTDOWN_SEGMENT_MS * 2) {
         countdown = "2";
-        countdownProgress = (1950 - remaining) / 700;
-      } else if (remaining > 550) {
-        countdown = "1";
-        countdownProgress = (1250 - remaining) / 700;
+        countdownProgress = (elapsed - COUNTDOWN_SEGMENT_MS) / COUNTDOWN_SEGMENT_MS;
       } else {
-        countdown = "GO!";
-        countdownProgress = (550 - remaining) / 550;
+        countdown = "1";
+        countdownProgress = (elapsed - COUNTDOWN_SEGMENT_MS * 2)
+          / COUNTDOWN_SEGMENT_MS;
       }
+    } else if (
+      this.status === "playing"
+      && this.countdownUntil > 0
+      && visualNow < this.countdownUntil + COUNTDOWN_SEGMENT_MS
+    ) {
+      countdown = "GO!";
+      countdownProgress = (visualNow - this.countdownUntil) / COUNTDOWN_SEGMENT_MS;
     }
     if (this.status !== "ready") this.syncLevelLights(visualNow);
     const activeMessage = visualNow < this.messageUntil ? this.message : null;
@@ -798,7 +821,7 @@ export class CrackAttackEngine {
           )
           : 0,
       chainDepth: this.chainDepth,
-      topOccupiedRow: this.topOccupiedRow(),
+      topOccupiedRow: this.topOccupiedRow(visualNow),
       levelLightBlends: this.levelLights.map((_, index) => (
         this.levelLightBlendAt(index, visualNow)
       )),
@@ -1320,6 +1343,9 @@ export class CrackAttackEngine {
       if (cell.clearUntil !== undefined) cell.clearUntil += duration;
       if (cell.awakenRevealAt !== undefined) cell.awakenRevealAt += duration;
       if (cell.awakenReleaseAt !== undefined) cell.awakenReleaseAt += duration;
+      if (cell.kind === "garbage" && cell.initialFallUntil !== undefined) {
+        cell.initialFallUntil += duration;
+      }
     };
 
     for (const row of this.board) for (const cell of row) shiftCell(cell);
@@ -1666,7 +1692,9 @@ export class CrackAttackEngine {
     const groupById = new Map(groups.map((group) => [group.groupId, group]));
     const selected = new Set<number>(
       [...direct].filter((groupId) => (
-        groupById.get(groupId)?.positions.every(({ cell }) => cell.state === "idle")
+        groupById.get(groupId)?.positions.every(({ cell }) => (
+          cell.state === "idle" && !this.cellIsMoving(cell, clearStarted)
+        ))
       )),
     );
     const queue = [...selected];
@@ -1680,7 +1708,9 @@ export class CrackAttackEngine {
       );
       for (const candidate of groups) {
         if (selected.has(candidate.groupId)) continue;
-        if (candidate.positions.some(({ cell }) => cell.state !== "idle")) continue;
+        if (candidate.positions.some(({ cell }) => (
+          cell.state !== "idle" || this.cellIsMoving(cell, clearStarted)
+        ))) continue;
         if (candidate.positions[0].cell.flavor === "gray") continue;
         const touching = candidate.positions.some(({ x, y }) =>
           [
@@ -1749,7 +1779,11 @@ export class CrackAttackEngine {
     for (let y = 0; y < this.board.length; y += 1) {
       for (let x = 0; x < BOARD_COLUMNS; x += 1) {
         const cell = this.board[y][x];
-        if (this.cellIsMoving(cell, now) && cell.animationFromY !== undefined) {
+        if (
+          cell
+          && this.cellIsMoving(cell, now)
+          && cell.animationFromY !== undefined
+        ) {
           cell.animationFromY += 1;
         }
       }
@@ -1785,6 +1819,27 @@ export class CrackAttackEngine {
     }
     if (landingY + height >= BUFFER_ROWS) return false;
 
+    // GarbageManager stages incoming pieces one row above the safe-height
+    // boundary (or above anything already falling there), then applies the
+    // same three-tick hang and three-ticks-per-row gravity as normal pieces.
+    let occupiedCeiling = -1;
+    for (let y = 0; y < this.board.length; y += 1) {
+      for (let column = 0; column < BOARD_COLUMNS; column += 1) {
+        const cell = this.board[y][column];
+        if (!cell) continue;
+        const visualSource = cell.kind === "garbage"
+          && cell.initialFallUntil !== undefined
+          && now < cell.initialFallUntil
+          ? cell.animationFromY ?? y
+          : y;
+        occupiedCeiling = Math.max(occupiedCeiling, visualSource);
+      }
+    }
+    const sourceBottomY = Math.max(VISIBLE_ROWS + 1, Math.floor(occupiedCeiling) + 1);
+    const fallDuration = FALL_HANG_MS
+      + Math.max(0, sourceBottomY - landingY) * FALL_ROW_MS;
+    const initialFallUntil = now + fallDuration;
+
     const groupId = this.nextGroupId++;
     const texture = Math.floor(this.random() * 6);
     for (let row = 0; row < height; row += 1) {
@@ -1797,15 +1852,17 @@ export class CrackAttackEngine {
           texture,
           state: "idle",
           animationFromX: x + column,
-          animationFromY: VISIBLE_ROWS + height + row,
+          animationFromY: sourceBottomY + row,
           animationStarted: now,
-          animationDuration: 430,
+          animationDuration: fallDuration,
+          animationDelay: FALL_HANG_MS,
+          initialFallUntil,
         };
         this.board[landingY + row][x + column] = cell;
       }
     }
     this.phase = "garbage";
-    this.phaseUntil = now + 430;
+    this.phaseUntil = initialFallUntil;
     this.events.push({ type: "garbage" });
     return true;
   }
@@ -1944,7 +2001,7 @@ export class CrackAttackEngine {
     x: number,
     y: number,
     now: number,
-  ): cell is BlockCell {
+  ): boolean {
     return cell?.kind === "block"
       && this.isVerticalFallMotion(cell, x, y, now);
   }
@@ -1973,7 +2030,10 @@ export class CrackAttackEngine {
     let cursorY = y;
     while (cursorY < this.board.length) {
       const cell = this.board[cursorY][x];
-      if (!this.isFallReservation(cell, x, cursorY, now)) break;
+      if (
+        cell?.kind !== "block"
+        || !this.isFallReservation(cell, x, cursorY, now)
+      ) break;
       stack.push({
         y: cursorY,
         cell,
@@ -2051,9 +2111,16 @@ export class CrackAttackEngine {
     this.cursorMoveStarted = now;
   }
 
-  private topOccupiedRow(): number {
+  private topOccupiedRow(now: number): number {
     for (let y = this.board.length - 1; y >= 0; y -= 1) {
-      if (this.board[y].some(Boolean)) return y;
+      if (this.board[y].some((cell) => (
+        cell !== null
+        && !(
+          cell.kind === "garbage"
+          && cell.initialFallUntil !== undefined
+          && now < cell.initialFallUntil
+        )
+      ))) return y;
     }
     return -1;
   }
@@ -2066,7 +2133,7 @@ export class CrackAttackEngine {
   }
 
   private syncLevelLights(now: number): void {
-    const topRow = this.topOccupiedRow();
+    const topRow = this.topOccupiedRow(now);
     for (let level = 0; level < VISIBLE_ROWS; level += 1) {
       const light = this.levelLights[level];
       const target = topRow >= level ? 1 : 0;

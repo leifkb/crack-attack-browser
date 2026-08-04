@@ -35,6 +35,9 @@ jobs:
       - name: Run engine and rendering tests
         run: npm run test:engine
 
+      - name: Type-check the static game
+        run: npm run typecheck:pages
+
       - name: Lint source
         run: npm run lint
 
