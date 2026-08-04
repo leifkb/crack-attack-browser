@@ -60,6 +60,9 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
       - name: Download built site
         uses: actions/download-artifact@v4
         with:
@@ -86,6 +89,9 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
       - name: Download built site
         if: github.event.action != 'closed'
         uses: actions/download-artifact@v4
@@ -101,5 +107,5 @@ jobs:
           source-dir: dist-pages
           preview-branch: gh-pages
           umbrella-dir: pr-preview
-          pages-base-url: https://leifkb.github.io/crack-attack-browser/
+          pages-base-url: leifkb.github.io/crack-attack-browser
           qr-code: false
