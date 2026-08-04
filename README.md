@@ -58,7 +58,10 @@ npm run validate:pages
 - Space or K: swap
 - Enter or L: raise the stack while held
 - P: pause
-- Pointer: tap a pair to select it; tap it again to swap
+- Touch/pointer: swipe a block left or right to swap it directly
+- Touch/pointer fallback: tap a pair to select it; tap it again to swap
+- On-screen move pad: touch anywhere and glide in a direction for repeated cursor steps; its broad
+  directional zones can also be tapped
 
 ## License
 

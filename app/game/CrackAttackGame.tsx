@@ -16,14 +16,22 @@ import {
 import {
   CANVAS_HEIGHT,
   CANVAS_WIDTH,
+  CELL_SIZE,
   canvasPointToBoard,
   drawGame,
   loadBlockMesh,
   prepareSparkleTextures,
   type RenderAssets,
 } from "./renderer";
+import {
+  consumeThumbpadMotion,
+  horizontalSwipePair,
+} from "./touchControls";
 
 const ASSET_LOAD_TIMEOUT_MS = 8000;
+const THUMBPAD_STEP_PX = 24;
+const THUMBPAD_PUCK_RANGE_PX = 17;
+const BOARD_SWIPE_THRESHOLD = CELL_SIZE * 0.42;
 
 const IMAGE_SOURCES = {
   logo: gameAssetUrl("logo.png"),
@@ -57,6 +65,47 @@ const IMAGE_SOURCES = {
 interface AudioRig {
   context: AudioContext;
   enabled: boolean;
+}
+
+interface CanvasGesture {
+  pointerId: number;
+  pointerType: string;
+  startCanvasX: number;
+  startCanvasY: number;
+  startColumn: number;
+  startRow: number;
+}
+
+interface ThumbpadGesture {
+  pointerId: number;
+  pointerType: string;
+  tapDx: number;
+  tapDy: number;
+  lastClientX: number;
+  lastClientY: number;
+  accumulatedX: number;
+  accumulatedY: number;
+  movedCursor: boolean;
+}
+
+function tactileTick(duration = 7): void {
+  try {
+    navigator.vibrate?.(duration);
+  } catch {
+    // Haptics are optional and may be denied by browser or device policy.
+  }
+}
+
+function pointerCanvasCoordinates(
+  canvas: HTMLCanvasElement,
+  clientX: number,
+  clientY: number,
+): { x: number; y: number } {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: ((clientX - rect.left) / rect.width) * CANVAS_WIDTH,
+    y: ((clientY - rect.top) / rect.height) * CANVAS_HEIGHT,
+  };
 }
 
 function tone(
@@ -218,11 +267,16 @@ export default function CrackAttackGame() {
   const highScoreRef = useRef(DEFAULT_SCORE_TO_BEAT);
   const lastUiUpdateRef = useRef(0);
   const lastTapRef = useRef<{ x: number; y: number; at: number } | null>(null);
+  const canvasGestureRef = useRef<CanvasGesture | null>(null);
+  const thumbpadGestureRef = useRef<ThumbpadGesture | null>(null);
+  const suppressThumbpadClickRef = useRef(false);
+  const raisePointerRef = useRef<number | null>(null);
   const [snapshot, setSnapshot] = useState<GameSnapshot>(() => engine.getSnapshot(0));
   const lastPublishedRef = useRef({ status: snapshot.status, score: snapshot.score });
   const [isNewBest, setIsNewBest] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [visualReady, setVisualReady] = useState(false);
+  const [thumbpadVisual, setThumbpadVisual] = useState({ active: false, x: 0, y: 0 });
 
   const ensureAudio = useCallback(() => {
     if (!audioRef.current) {
@@ -389,16 +443,28 @@ export default function CrackAttackGame() {
     canvasRef.current?.focus();
   }, [engine]);
 
-  const swap = useCallback(() => {
+  const attemptSwap = useCallback((withTactileFeedback = false) => {
     ensureAudio();
-    engine.swap(performance.now());
+    const swapped = engine.swap(performance.now());
+    if (swapped && withTactileFeedback) tactileTick(11);
     canvasRef.current?.focus();
+    return swapped;
   }, [engine, ensureAudio]);
+
+  const swap = useCallback(() => {
+    attemptSwap();
+  }, [attemptSwap]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!assetsReadyRef.current) return;
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+      if (
+        event.target instanceof HTMLInputElement
+        || event.target instanceof HTMLTextAreaElement
+        || event.target instanceof HTMLSelectElement
+        || event.target instanceof HTMLButtonElement
+        || event.target instanceof HTMLAnchorElement
+      ) return;
       const key = event.key.toLowerCase();
       const handled = [
         "arrowleft", "arrowright", "arrowup", "arrowdown",
@@ -444,41 +510,259 @@ export default function CrackAttackGame() {
     return () => document.removeEventListener("visibilitychange", onVisibility);
   }, [engine]);
 
-  const handleCanvasPointer = (event: React.PointerEvent<HTMLCanvasElement>) => {
+  const handleCanvasPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    if (canvasGestureRef.current) return;
     ensureAudio();
-    const rect = event.currentTarget.getBoundingClientRect();
-    const canvasX = ((event.clientX - rect.left) / rect.width) * CANVAS_WIDTH;
-    const canvasY = ((event.clientY - rect.top) / rect.height) * CANVAS_HEIGHT;
-    const current = engine.getSnapshot(performance.now());
-    const point = canvasPointToBoard(canvasX, canvasY, current.rise);
-    if (!point) return;
-    const cursorX = Math.min(4, point.x);
+    const canvasPosition = pointerCanvasCoordinates(
+      event.currentTarget,
+      event.clientX,
+      event.clientY,
+    );
     const now = performance.now();
-    const previous = lastTapRef.current;
-    if (previous && previous.x === cursorX && previous.y === point.y && now - previous.at < 650) {
-      engine.setCursor(cursorX, point.y, now);
-      engine.swap(now);
-      lastTapRef.current = null;
-    } else {
-      engine.setCursor(cursorX, point.y, now);
-      lastTapRef.current = { x: cursorX, y: point.y, at: now };
+    const current = engine.getSnapshot(now);
+    const point = canvasPointToBoard(canvasPosition.x, canvasPosition.y, current.rise);
+    if (!point) return;
+
+    const cursorX = Math.min(4, point.x);
+    engine.setCursor(cursorX, point.y, now);
+    canvasGestureRef.current = {
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      startCanvasX: canvasPosition.x,
+      startCanvasY: canvasPosition.y,
+      startColumn: point.x,
+      startRow: point.y,
+    };
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is a convenience; the gesture can still finish inside the canvas.
     }
     event.currentTarget.focus();
   };
 
-  const move = (dx: number, dy: number) => {
+  const handleCanvasPointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const gesture = canvasGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    const canvasPosition = pointerCanvasCoordinates(
+      event.currentTarget,
+      event.clientX,
+      event.clientY,
+    );
+    const pairX = horizontalSwipePair(
+      gesture.startColumn,
+      canvasPosition.x - gesture.startCanvasX,
+      canvasPosition.y - gesture.startCanvasY,
+      BOARD_SWIPE_THRESHOLD,
+    );
+    if (pairX !== null) {
+      engine.setCursor(pairX, gesture.startRow, performance.now());
+    }
+  };
+
+  const handleCanvasPointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const gesture = canvasGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    canvasGestureRef.current = null;
+
+    const canvasPosition = pointerCanvasCoordinates(
+      event.currentTarget,
+      event.clientX,
+      event.clientY,
+    );
+    const pairX = horizontalSwipePair(
+      gesture.startColumn,
+      canvasPosition.x - gesture.startCanvasX,
+      canvasPosition.y - gesture.startCanvasY,
+      BOARD_SWIPE_THRESHOLD,
+    );
+    const now = performance.now();
+    if (pairX !== null) {
+      engine.setCursor(pairX, gesture.startRow, now);
+      const swapped = engine.swap(now);
+      if (swapped && gesture.pointerType !== "mouse") tactileTick(11);
+      lastTapRef.current = null;
+    } else {
+      const cursorX = Math.min(4, gesture.startColumn);
+      const previous = lastTapRef.current;
+      if (
+        previous
+        && previous.x === cursorX
+        && previous.y === gesture.startRow
+        && now - previous.at < 650
+      ) {
+        engine.setCursor(cursorX, gesture.startRow, now);
+        const swapped = engine.swap(now);
+        if (swapped && gesture.pointerType !== "mouse") tactileTick(11);
+        lastTapRef.current = null;
+      } else {
+        engine.setCursor(cursorX, gesture.startRow, now);
+        lastTapRef.current = { x: cursorX, y: gesture.startRow, at: now };
+      }
+    }
+
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // Capture may already have been released by the browser.
+    }
+    event.currentTarget.focus();
+  };
+
+  const handleCanvasPointerCancel = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (canvasGestureRef.current?.pointerId === event.pointerId) {
+      canvasGestureRef.current = null;
+    }
+  };
+
+  const move = useCallback((dx: number, dy: number) => {
     ensureAudio();
     engine.moveCursor(dx, dy, performance.now());
     canvasRef.current?.focus();
+  }, [engine, ensureAudio]);
+
+  const tapMove = useCallback((dx: number, dy: number) => {
+    if (suppressThumbpadClickRef.current) return;
+    move(dx, dy);
+    tactileTick();
+  }, [move]);
+
+  const handleThumbpadPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    if (thumbpadGestureRef.current) return;
+    ensureAudio();
+    const zone = (event.target as HTMLElement).closest<HTMLElement>("[data-pad-dx]");
+    thumbpadGestureRef.current = {
+      pointerId: event.pointerId,
+      pointerType: event.pointerType,
+      tapDx: Number(zone?.dataset.padDx ?? 0),
+      tapDy: Number(zone?.dataset.padDy ?? 0),
+      lastClientX: event.clientX,
+      lastClientY: event.clientY,
+      accumulatedX: 0,
+      accumulatedY: 0,
+      movedCursor: false,
+    };
+    setThumbpadVisual({ active: true, x: 0, y: 0 });
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // The broad tap zones still work if capture is unavailable.
+    }
+    event.preventDefault();
   };
 
-  const pressRaise = () => {
+  const handleThumbpadPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const gesture = thumbpadGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+
+    gesture.accumulatedX += event.clientX - gesture.lastClientX;
+    gesture.accumulatedY += event.clientY - gesture.lastClientY;
+    gesture.lastClientX = event.clientX;
+    gesture.lastClientY = event.clientY;
+
+    const motion = consumeThumbpadMotion(
+      gesture.accumulatedX,
+      gesture.accumulatedY,
+      THUMBPAD_STEP_PX,
+    );
+    gesture.accumulatedX = motion.remainderX;
+    gesture.accumulatedY = motion.remainderY;
+
+    if (motion.steps.length > 0) {
+      const now = performance.now();
+      for (const step of motion.steps) {
+        // Pointer Y increases toward the bottom of the screen, while board Y
+        // increases upward.
+        engine.moveCursor(step.dx, -step.dy, now);
+      }
+      gesture.movedCursor = true;
+      if (gesture.pointerType !== "mouse") tactileTick();
+    }
+
+    setThumbpadVisual({
+      active: true,
+      x: Math.max(
+        -THUMBPAD_PUCK_RANGE_PX,
+        Math.min(
+          THUMBPAD_PUCK_RANGE_PX,
+          (gesture.accumulatedX / THUMBPAD_STEP_PX) * THUMBPAD_PUCK_RANGE_PX,
+        ),
+      ),
+      y: Math.max(
+        -THUMBPAD_PUCK_RANGE_PX,
+        Math.min(
+          THUMBPAD_PUCK_RANGE_PX,
+          (gesture.accumulatedY / THUMBPAD_STEP_PX) * THUMBPAD_PUCK_RANGE_PX,
+        ),
+      ),
+    });
+    event.preventDefault();
+  };
+
+  const finishThumbpadGesture = (event: React.PointerEvent<HTMLDivElement>) => {
+    const gesture = thumbpadGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    thumbpadGestureRef.current = null;
+    setThumbpadVisual({ active: false, x: 0, y: 0 });
+    if (!gesture.movedCursor && (gesture.tapDx !== 0 || gesture.tapDy !== 0)) {
+      move(gesture.tapDx, gesture.tapDy);
+      if (gesture.pointerType !== "mouse") tactileTick();
+    }
+    // A browser may dispatch click immediately after pointerup. The pointer
+    // gesture already handled both drags and taps, so suppress that duplicate;
+    // keyboard-initiated button clicks still go through the normal handler.
+    suppressThumbpadClickRef.current = true;
+    window.setTimeout(() => {
+      suppressThumbpadClickRef.current = false;
+    }, 0);
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // Capture may already have been released by the browser.
+    }
+    event.preventDefault();
+  };
+
+  const cancelThumbpadGesture = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (thumbpadGestureRef.current?.pointerId !== event.pointerId) return;
+    thumbpadGestureRef.current = null;
+    setThumbpadVisual({ active: false, x: 0, y: 0 });
+  };
+
+  const pressRaise = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
     ensureAudio();
+    raisePointerRef.current = event.pointerId;
     engine.setRaiseHeld(true);
+    if (event.pointerType !== "mouse") tactileTick(10);
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Holding still works while the pointer remains over the button.
+    }
+    event.preventDefault();
     canvasRef.current?.focus();
   };
 
-  const releaseRaise = () => engine.setRaiseHeld(false);
+  const releaseRaise = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (raisePointerRef.current !== event.pointerId) return;
+    raisePointerRef.current = null;
+    engine.setRaiseHeld(false);
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // Capture may already have been released by the browser.
+    }
+    event.preventDefault();
+  };
 
   return (
     <section
@@ -508,10 +792,14 @@ export default function CrackAttackGame() {
         <canvas
           ref={canvasRef}
           className="game-canvas"
-          onPointerDown={handleCanvasPointer}
+          onPointerDown={handleCanvasPointerDown}
+          onPointerMove={handleCanvasPointerMove}
+          onPointerUp={handleCanvasPointerUp}
+          onPointerCancel={handleCanvasPointerCancel}
+          onLostPointerCapture={handleCanvasPointerCancel}
           tabIndex={0}
           role="img"
-          aria-label="A six-column Crack Attack puzzle board. Use arrow keys to move the two-cell cursor and Space to swap blocks."
+          aria-label="A six-column Crack Attack puzzle board. Swipe a block sideways to swap it, or tap a pair twice. Keyboard players can use arrow keys and Space."
         />
 
         {snapshot.status === "ready" && (
@@ -541,14 +829,69 @@ export default function CrackAttackGame() {
         )}
       </div>
 
-      <div className="touch-console" aria-label="On-screen game controls">
-        <div className="direction-pad">
-          <button type="button" className="up" aria-label="Move cursor up" onClick={() => move(0, 1)}>▲</button>
-          <button type="button" className="left" aria-label="Move cursor left" onClick={() => move(-1, 0)}>◀</button>
-          <button type="button" className="down" aria-label="Move cursor down" onClick={() => move(0, -1)}>▼</button>
-          <button type="button" className="right" aria-label="Move cursor right" onClick={() => move(1, 0)}>▶</button>
+      <p className="touch-hint" id="touch-control-hint">
+        <strong>Touch:</strong> swipe blocks sideways, or glide anywhere on the move pad.
+      </p>
+      <div
+        className="touch-console"
+        role="group"
+        aria-label="On-screen game controls"
+        aria-describedby="touch-control-hint"
+      >
+        <div
+          className={`gesture-pad${thumbpadVisual.active ? " is-active" : ""}`}
+          onPointerDown={handleThumbpadPointerDown}
+          onPointerMove={handleThumbpadPointerMove}
+          onPointerUp={finishThumbpadGesture}
+          onPointerCancel={cancelThumbpadGesture}
+          onLostPointerCapture={cancelThumbpadGesture}
+        >
+          <span
+            className="gesture-pad-puck"
+            aria-hidden="true"
+            style={{
+              transform: `translate3d(${thumbpadVisual.x}px, ${thumbpadVisual.y}px, 0)`,
+            }}
+          />
+          <span className="gesture-pad-name" aria-hidden="true">Glide</span>
+          <button
+            type="button"
+            className="pad-zone pad-up"
+            data-pad-dx="0"
+            data-pad-dy="1"
+            aria-label="Move cursor up"
+            onClick={() => tapMove(0, 1)}
+          ><span aria-hidden="true">▲</span></button>
+          <button
+            type="button"
+            className="pad-zone pad-right"
+            data-pad-dx="1"
+            data-pad-dy="0"
+            aria-label="Move cursor right"
+            onClick={() => tapMove(1, 0)}
+          ><span aria-hidden="true">▶</span></button>
+          <button
+            type="button"
+            className="pad-zone pad-down"
+            data-pad-dx="0"
+            data-pad-dy="-1"
+            aria-label="Move cursor down"
+            onClick={() => tapMove(0, -1)}
+          ><span aria-hidden="true">▼</span></button>
+          <button
+            type="button"
+            className="pad-zone pad-left"
+            data-pad-dx="-1"
+            data-pad-dy="0"
+            aria-label="Move cursor left"
+            onClick={() => tapMove(-1, 0)}
+          ><span aria-hidden="true">◀</span></button>
         </div>
-        <button type="button" className="console-button swap-button" onClick={swap}>
+        <button
+          type="button"
+          className="console-button swap-button"
+          onClick={() => attemptSwap(true)}
+        >
           <span>Swap</span>
           <kbd>Space</kbd>
         </button>
@@ -558,7 +901,7 @@ export default function CrackAttackGame() {
           onPointerDown={pressRaise}
           onPointerUp={releaseRaise}
           onPointerCancel={releaseRaise}
-          onPointerLeave={releaseRaise}
+          onLostPointerCapture={releaseRaise}
         >
           <span>Raise</span>
           <kbd>Enter</kbd>
