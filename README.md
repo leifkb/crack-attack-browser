@@ -60,13 +60,21 @@ npm run build:pages
 npm run validate:pages
 ```
 
+For a browser-hosted development preview, open the repository or a pull request
+in StackBlitz. The checked-in `.stackblitzrc` automatically starts the static
+Pages entry point with `npm run dev:pages` instead of the Cloudflare development
+runtime used by the main `dev` script.
+
 ## Controls
 
 - Arrow keys or WASD: move cursor
 - Space or K: swap
 - Enter or L: raise the stack while held
 - P: pause
-- Pointer: tap a pair to select it; tap it again to swap
+- Touch/pointer: swipe a block left or right to swap it directly
+- Touch/pointer fallback: tap a pair to select it; tap it again to swap
+- On-screen move pad: touch anywhere and glide in a direction for repeated cursor steps; its broad
+  directional zones can also be tapped
 
 ## License
 

@@ -15,8 +15,9 @@ export default function Home() {
             <h3>Build lines</h3>
             <p>
               Move the two-block cursor and swap neighboring pieces. Match three or more of the same
-              color horizontally or vertically before the rising stack reaches the top. Press Enter
-              when you want to bring in the next row sooner.
+              color horizontally or vertically before the rising stack reaches the top. On a touch
+              screen, swipe a block sideways to swap it directly, or glide on the move pad without
+              hunting for individual arrows. Raise brings in the next row sooner.
             </p>
           </article>
           <article>
