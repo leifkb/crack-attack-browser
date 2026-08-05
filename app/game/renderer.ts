@@ -76,6 +76,7 @@ export interface RenderAssets {
   font: HTMLImageElement | null;
   fontUi: HTMLImageElement | null;
   messageAnyKey: HTMLImageElement | null;
+  messageTapScreen: HTMLImageElement | null;
   messagePaused: HTMLImageElement | null;
   messageGameOver: HTMLImageElement | null;
   countdown: Record<"1" | "2" | "3" | "GO!", HTMLImageElement | null>;
@@ -2092,18 +2093,13 @@ function drawReadyScreen(
   );
   context.save();
   context.globalAlpha = pulse;
-  if (useTouchPrompt) {
-    drawCenteredUiText(context, assets, "TAP THE SCREEN", centerX, messageCenterY - 49, 36);
-    drawCenteredUiText(context, assets, "TO BEGIN", centerX, messageCenterY + 8, 36);
-  } else {
-    drawCenteredAsset(
-      context,
-      assets.messageAnyKey,
-      BOARD_WIDTH,
-      BOARD_WIDTH / 2,
-      messageCenterY,
-    );
-  }
+  drawCenteredAsset(
+    context,
+    useTouchPrompt ? assets.messageTapScreen : assets.messageAnyKey,
+    BOARD_WIDTH,
+    BOARD_WIDTH / 2,
+    messageCenterY,
+  );
   context.restore();
 
   const scoreCenterY = VIEW_CENTER_Y + 1.3 * CELL_SIZE;

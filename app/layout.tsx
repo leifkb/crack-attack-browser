@@ -6,6 +6,7 @@ const gameImagePreloads = [
   "/crack-attack-assets/logo.png",
   "/crack-attack-assets/font0_score.png",
   "/crack-attack-assets/message_anykey.png",
+  "/crack-attack-assets/message_tap_screen.png",
   "/crack-attack-assets/message_paused.png",
   "/crack-attack-assets/message_game_over.png",
   "/crack-attack-assets/count_down_1.png",
