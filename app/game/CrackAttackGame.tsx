@@ -788,14 +788,6 @@ export default function CrackAttackGame() {
         </div>
       </div>
 
-      <p className="keyboard-hint">
-        <strong>Keyboard controls</strong>
-        <span><kbd>Arrow keys</kbd> move</span>
-        <span><kbd>Space</kbd> swap</span>
-        <span><kbd>Enter</kbd> raise</span>
-        <span><kbd>P</kbd> pause</span>
-      </p>
-
       <div className="game-frame">
         <canvas
           ref={canvasRef}
@@ -836,6 +828,14 @@ export default function CrackAttackGame() {
           </div>
         )}
       </div>
+
+      <p className="keyboard-hint">
+        <strong>Keyboard controls</strong>
+        <span><kbd>Arrow keys</kbd> move</span>
+        <span><kbd>Space</kbd> swap</span>
+        <span><kbd>Enter</kbd> raise</span>
+        <span><kbd>P</kbd> pause</span>
+      </p>
 
       <p className="touch-hint" id="touch-control-hint">
         <strong>Touch:</strong> swipe blocks sideways, or glide anywhere on the move pad.
