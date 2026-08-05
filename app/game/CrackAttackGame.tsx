@@ -32,6 +32,7 @@ const ASSET_LOAD_TIMEOUT_MS = 8000;
 const THUMBPAD_STEP_PX = 24;
 const THUMBPAD_PUCK_RANGE_PX = 17;
 const BOARD_SWIPE_THRESHOLD = CELL_SIZE * 0.42;
+const TOUCH_PRIMARY_QUERY = "(hover: none) and (pointer: coarse)";
 
 const IMAGE_SOURCES = {
   logo: gameAssetUrl("logo.png"),
@@ -219,6 +220,7 @@ function paintCanvas(
   snapshot: GameSnapshot,
   assets: RenderAssets,
   highScore: number,
+  useTouchPrompt: boolean,
 ): void {
   if (!canvas) return;
   const density = Math.min(2, window.devicePixelRatio || 1);
@@ -231,7 +233,7 @@ function paintCanvas(
   const context = canvas.getContext("2d");
   if (!context) return;
   context.setTransform(density, 0, 0, density, 0, 0);
-  drawGame(context, snapshot, assets, highScore);
+  drawGame(context, snapshot, assets, highScore, useTouchPrompt);
 }
 
 function statusCopy(snapshot: GameSnapshot): string {
@@ -264,6 +266,7 @@ export default function CrackAttackGame() {
   });
   const audioRef = useRef<AudioRig | null>(null);
   const assetsReadyRef = useRef(false);
+  const useTouchPromptRef = useRef(false);
   const highScoreRef = useRef(DEFAULT_SCORE_TO_BEAT);
   const lastUiUpdateRef = useRef(0);
   const lastTapRef = useRef<{ x: number; y: number; at: number } | null>(null);
@@ -302,6 +305,12 @@ export default function CrackAttackGame() {
 
   useEffect(() => {
     highScoreRef.current = loadScoreToBeat(browserScoreStorage());
+    const touchPrimaryMedia = window.matchMedia(TOUCH_PRIMARY_QUERY);
+    const syncReadyPrompt = () => {
+      useTouchPromptRef.current = touchPrimaryMedia.matches;
+    };
+    syncReadyPrompt();
+    touchPrimaryMedia.addEventListener("change", syncReadyPrompt);
     let active = true;
     let revealFrame = 0;
     void Promise.all([
@@ -363,13 +372,20 @@ export default function CrackAttackGame() {
       // prevents the Canvas fallbacks from ever reaching the screen while the
       // original logo, bitmap type, and block mesh are still loading.
       const now = performance.now();
-      paintCanvas(canvasRef.current, engine.getSnapshot(now), assets, highScoreRef.current);
+      paintCanvas(
+        canvasRef.current,
+        engine.getSnapshot(now),
+        assets,
+        highScoreRef.current,
+        useTouchPromptRef.current,
+      );
       revealFrame = window.requestAnimationFrame(() => {
         if (active) setVisualReady(true);
       });
     });
     return () => {
       active = false;
+      touchPrimaryMedia.removeEventListener("change", syncReadyPrompt);
       window.cancelAnimationFrame(revealFrame);
     };
   }, [engine]);
@@ -399,7 +415,13 @@ export default function CrackAttackGame() {
 
       const canvas = canvasRef.current;
       if (assetsReadyRef.current) {
-        paintCanvas(canvas, current, assetsRef.current, highScoreRef.current);
+        paintCanvas(
+          canvas,
+          current,
+          assetsRef.current,
+          highScoreRef.current,
+          useTouchPromptRef.current,
+        );
       }
 
       const lastPublished = lastPublishedRef.current;
