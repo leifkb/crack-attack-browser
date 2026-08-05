@@ -172,7 +172,55 @@ canvas:focus-visible {
   cursor: pointer;
 }
 
+.keyboard-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  margin: 0 0 14px;
+  padding: 13px 18px;
+  border: 1px solid rgba(123, 137, 219, 0.34);
+  border-radius: 9px;
+  background: linear-gradient(180deg, rgba(18, 23, 44, 0.96), rgba(8, 11, 22, 0.96));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.04);
+  color: #cbd1ed;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.025em;
+}
+
+.keyboard-hint strong {
+  color: #ffffff;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.keyboard-hint span {
+  white-space: nowrap;
+}
+
+.keyboard-hint kbd {
+  display: inline-block;
+  min-width: 25px;
+  margin-right: 4px;
+  padding: 3px 6px;
+  border: 1px solid rgba(163, 174, 235, 0.42);
+  border-bottom-color: rgba(163, 174, 235, 0.68);
+  border-radius: 5px;
+  background: #171d35;
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 850;
+  line-height: 1;
+  text-align: center;
+  box-shadow: 0 2px 0 #070914;
+}
+
 .touch-hint {
+  display: none;
   margin: 14px auto 0;
   color: #7781aa;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -188,7 +236,7 @@ canvas:focus-visible {
 }
 
 .touch-console {
-  display: flex;
+  display: none;
   align-items: stretch;
   justify-content: center;
   gap: 12px;
@@ -376,6 +424,20 @@ canvas:focus-visible {
   color: #ffc0c4;
 }
 
+@media (hover: none) and (pointer: coarse) {
+  .keyboard-hint {
+    display: none;
+  }
+
+  .touch-hint {
+    display: block;
+  }
+
+  .touch-console {
+    display: flex;
+  }
+}
+
 .player-guide {
   display: grid;
   width: min(1080px, 100%);
@@ -468,7 +530,18 @@ canvas:focus-visible {
 
 @media (max-width: 820px) {
   .port-page {
-    padding: 16px 10px 36px;
+    padding: 16px 0 36px;
+  }
+
+  .port-bar {
+    margin-right: 10px;
+    margin-left: 10px;
+  }
+
+  .game-frame {
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
   }
 
   .port-bar {
@@ -487,6 +560,8 @@ canvas:focus-visible {
 
   .touch-console {
     justify-content: space-between;
+    margin-right: 10px;
+    margin-left: 10px;
   }
 
   .player-guide {
@@ -525,7 +600,6 @@ canvas:focus-visible {
   }
 
   .touch-console {
-    display: grid;
     grid-template-columns: minmax(130px, 1fr) repeat(2, minmax(68px, 84px));
     gap: 7px;
   }
@@ -552,16 +626,18 @@ canvas:focus-visible {
     font-size: 11px;
   }
 
-  .console-button kbd {
-    display: none;
-  }
-
   .player-guide {
     padding-top: 40px;
   }
 
   .port-footer {
     flex-direction: column;
+  }
+}
+
+@media (max-width: 560px) and (hover: none) and (pointer: coarse) {
+  .touch-console {
+    display: grid;
   }
 }
 

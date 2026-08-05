@@ -788,6 +788,14 @@ export default function CrackAttackGame() {
         </div>
       </div>
 
+      <p className="keyboard-hint">
+        <strong>Keyboard controls</strong>
+        <span><kbd>Arrow keys</kbd> move</span>
+        <span><kbd>Space</kbd> swap</span>
+        <span><kbd>Enter</kbd> raise</span>
+        <span><kbd>P</kbd> pause</span>
+      </p>
+
       <div className="game-frame">
         <canvas
           ref={canvasRef}
@@ -799,7 +807,7 @@ export default function CrackAttackGame() {
           onLostPointerCapture={handleCanvasPointerCancel}
           tabIndex={0}
           role="img"
-          aria-label="A six-column Crack Attack puzzle board. Swipe a block sideways to swap it, or tap a pair twice. Keyboard players can use arrow keys and Space."
+          aria-label="A six-column Crack Attack puzzle board with a movable two-block cursor."
         />
 
         {snapshot.status === "ready" && (
@@ -893,7 +901,6 @@ export default function CrackAttackGame() {
           onClick={() => attemptSwap(true)}
         >
           <span>Swap</span>
-          <kbd>Space</kbd>
         </button>
         <button
           type="button"
@@ -904,7 +911,6 @@ export default function CrackAttackGame() {
           onLostPointerCapture={releaseRaise}
         >
           <span>Raise</span>
-          <kbd>Enter</kbd>
         </button>
       </div>
 
