@@ -791,6 +791,24 @@ export default function CrackAttackGame() {
     event.preventDefault();
   };
 
+  const pressSwap = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+
+    // Handle physical pointers on pointerdown instead of waiting for click.
+    // Browsers can defer or suppress a touch-generated click while a different
+    // pointer remains captured by the movement pad; pointer events themselves
+    // remain independent, so this keeps Swap genuinely multi-touch.
+    attemptSwap(event.pointerType !== "mouse");
+    event.preventDefault();
+  };
+
+  const clickSwap = (event: React.MouseEvent<HTMLButtonElement>) => {
+    // Pointer activation was already handled above. A detail of zero denotes
+    // keyboard or assistive-technology activation, which still needs a click
+    // path for the native button to remain accessible.
+    if (event.detail === 0) attemptSwap();
+  };
+
   return (
     <section
       className="game-experience"
@@ -925,7 +943,8 @@ export default function CrackAttackGame() {
         <button
           type="button"
           className="console-button swap-button"
-          onClick={() => attemptSwap(true)}
+          onPointerDown={pressSwap}
+          onClick={clickSwap}
         >
           <span>Swap</span>
         </button>
