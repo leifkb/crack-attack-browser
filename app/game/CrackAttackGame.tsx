@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { gameAssetUrl } from "./assetUrl";
 import {
   CrackAttackEngine,
+  GAME_OVER_RESTART_DELAY_MS,
   type GameEvent,
   type GameSnapshot,
 } from "./engine";
@@ -450,19 +451,8 @@ export default function CrackAttackGame() {
   const startRun = useCallback(() => {
     ensureAudio();
     const now = performance.now();
-    if (engine.getSnapshot(now).status === "gameover") engine.reset(Date.now());
-    setIsNewBest(false);
-    engine.start(now);
-    canvasRef.current?.focus();
-    setSnapshot(engine.getSnapshot(now));
-  }, [engine, ensureAudio]);
-
-  const restartRun = useCallback(() => {
-    ensureAudio();
-    engine.reset(Date.now());
-    setIsNewBest(false);
-    const now = performance.now();
-    engine.start(now);
+    const started = engine.start(now, Date.now());
+    if (started) setIsNewBest(false);
     canvasRef.current?.focus();
     setSnapshot(engine.getSnapshot(now));
   }, [engine, ensureAudio]);
@@ -873,7 +863,12 @@ export default function CrackAttackGame() {
 
         {snapshot.status === "gameover" && (
           <div className="game-overlay">
-            <button type="button" className="original-screen-action" onClick={restartRun}>
+            <button
+              type="button"
+              className="original-screen-action"
+              onClick={startRun}
+              disabled={snapshot.gameOverElapsedMs < GAME_OVER_RESTART_DELAY_MS}
+            >
               <span className="sr-only">
                 {isNewBest ? "New best score. " : ""}Start a new game after scoring {snapshot.score}
               </span>
