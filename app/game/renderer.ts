@@ -76,6 +76,7 @@ export interface RenderAssets {
   font: HTMLImageElement | null;
   fontUi: HTMLImageElement | null;
   messageAnyKey: HTMLImageElement | null;
+  messageTapScreen: HTMLImageElement | null;
   messagePaused: HTMLImageElement | null;
   messageGameOver: HTMLImageElement | null;
   countdown: Record<"1" | "2" | "3" | "GO!", HTMLImageElement | null>;
@@ -2083,6 +2084,7 @@ function drawReadyScreen(
   snapshot: GameSnapshot,
   assets: RenderAssets,
   highScore: number,
+  useTouchPrompt: boolean,
 ): void {
   const centerX = BOARD_X + BOARD_WIDTH / 2;
   const messageCenterY = VIEW_CENTER_Y - (13 / 6) * CELL_SIZE;
@@ -2093,7 +2095,7 @@ function drawReadyScreen(
   context.globalAlpha = pulse;
   drawCenteredAsset(
     context,
-    assets.messageAnyKey,
+    useTouchPrompt ? assets.messageTapScreen : assets.messageAnyKey,
     BOARD_WIDTH,
     BOARD_WIDTH / 2,
     messageCenterY,
@@ -2129,12 +2131,13 @@ function drawStatusArt(
   snapshot: GameSnapshot,
   assets: RenderAssets,
   highScore: number,
+  useTouchPrompt: boolean,
 ): void {
   if (snapshot.countdown) {
     drawCountdownArt(context, snapshot, assets);
   }
   if (snapshot.status === "ready") {
-    drawReadyScreen(context, snapshot, assets, highScore);
+    drawReadyScreen(context, snapshot, assets, highScore, useTouchPrompt);
   } else if (snapshot.status === "paused") {
     context.fillStyle = "rgba(0, 0, 0, .45)";
     context.fillRect(BOARD_X, BOARD_TOP, BOARD_WIDTH, BOARD_HEIGHT);
@@ -2149,6 +2152,7 @@ export function drawGame(
   snapshot: GameSnapshot,
   assets: RenderAssets,
   highScore: number,
+  useTouchPrompt = false,
 ): void {
   if (!frameCanvas && typeof document !== "undefined") {
     frameCanvas = document.createElement("canvas");
@@ -2282,7 +2286,7 @@ export function drawGame(
 
     drawTransientEffects(target, snapshot, assets);
   }
-  drawStatusArt(target, snapshot, assets, highScore);
+  drawStatusArt(target, snapshot, assets, highScore, useTouchPrompt);
 
   if (frameCanvas && frameContext) {
     context.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
