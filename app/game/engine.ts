@@ -43,6 +43,13 @@ const SIMULATION_STEP_MS = 20;
 // Original 50 Hz timing: three ticks hanging, then three ticks per row.
 const FALL_HANG_MS = 60;
 const FALL_ROW_MS = 60;
+// Spring.h applies these values once per 50 Hz simulation tick. Spring::y is
+// measured in OpenGL world units, where one playfield row is exactly 2 units.
+const IMPACT_SPRING_VELOCITY = 0.1;
+const IMPACT_GARBAGE_DENSITY = 0.2;
+const IMPACT_SPRING_STIFFNESS = 0.1;
+const IMPACT_SPRING_DRAG = 0.1;
+const WORLD_UNITS_PER_ROW = 2;
 
 export type BlockFlavor = 0 | 1 | 2 | 3 | 4 | 5;
 export type GameStatus = "ready" | "countdown" | "playing" | "paused" | "gameover";
@@ -178,6 +185,7 @@ export type GameEvent =
   | { type: "clear"; magnitude: number; gray: boolean }
   | { type: "chain"; depth: number }
   | { type: "garbage" }
+  | { type: "garbage-impact"; area: number }
   | { type: "awaken"; flavor: BlockFlavor; sequence: number }
   | { type: "danger" }
   | { type: "rise" }
@@ -192,6 +200,7 @@ export interface GameSnapshot {
   score: number;
   elapsedMs: number;
   rise: number;
+  impactOffsetRows: number;
   cursorX: number;
   cursorY: number;
   cursorRenderX: number;
@@ -426,6 +435,9 @@ export class CrackAttackEngine {
   private score = 0;
   private elapsedMs = 0;
   private rise = 0;
+  private impactSpringY = 0;
+  private impactSpringVelocity = 0;
+  private pendingGarbageImpactArea = 0;
   private cursorX = 2;
   private cursorY = 4;
   private cursorFromX = 2;
@@ -484,6 +496,9 @@ export class CrackAttackEngine {
     this.score = 0;
     this.elapsedMs = 0;
     this.rise = 0;
+    this.impactSpringY = 0;
+    this.impactSpringVelocity = 0;
+    this.pendingGarbageImpactArea = 0;
     this.cursorX = 2;
     this.cursorY = 4;
     this.cursorFromX = 2;
@@ -576,7 +591,10 @@ export class CrackAttackEngine {
     this.announceAwakeningReveals(now);
     this.releaseDueAwakening(now);
     this.refreshPhase(now);
-    if (this.status !== "playing") return;
+    if (this.status !== "playing") {
+      this.stepImpactSpring();
+      return;
+    }
 
     const topRow = this.topOccupiedRow(now);
     const inDanger = topRow >= VISIBLE_ROWS - 1;
@@ -596,6 +614,7 @@ export class CrackAttackEngine {
       if (!this.wasInDanger) this.events.push({ type: "danger" });
       if (this.dangerMs >= DANGER_LOSS_DELAY_MS) {
         this.finishGame(now);
+        this.stepImpactSpring();
         return;
       }
     } else if (!inDanger) {
@@ -650,6 +669,10 @@ export class CrackAttackEngine {
         }
       }
     }
+
+    // Game::timeStep advances Spring after grid motion, Creep, and queued
+    // garbage processing. Keep that exact final position in the 20 ms tick.
+    this.stepImpactSpring();
   }
 
   moveCursor(dx: number, dy: number, now = this.lastUpdate ?? 0): void {
@@ -808,6 +831,7 @@ export class CrackAttackEngine {
       score: this.score,
       elapsedMs: this.elapsedMs,
       rise: this.rise,
+      impactOffsetRows: this.impactSpringY / WORLD_UNITS_PER_ROW,
       cursorX: this.cursorX,
       cursorY: this.cursorY,
       cursorRenderX: cursor.x,
@@ -890,6 +914,7 @@ export class CrackAttackEngine {
   }
 
   private finishGarbage(now: number): void {
+    this.notifyGarbageImpact();
     const fallDuration = this.applyGravity(now);
     const pendingMotionUntil = Math.max(
       this.backgroundSwapUntil,
@@ -906,6 +931,28 @@ export class CrackAttackEngine {
     }
     this.resolveMatches(now);
     this.refreshPhase(now);
+  }
+
+  private notifyGarbageImpact(): void {
+    const area = this.pendingGarbageImpactArea;
+    this.pendingGarbageImpactArea = 0;
+    if (area <= 0) return;
+
+    // Exact Spring::notifyImpact behavior from Crack Attack 1.1.15-cvs.
+    // A second impact cannot add downward velocity while the board is already
+    // moving downward faster than the spring's base impact velocity.
+    const deltaVelocity = (IMPACT_SPRING_VELOCITY + this.impactSpringVelocity)
+      * area
+      * IMPACT_GARBAGE_DENSITY;
+    if (deltaVelocity > 0) this.impactSpringVelocity -= deltaVelocity;
+    this.events.push({ type: "garbage-impact", area });
+  }
+
+  private stepImpactSpring(): void {
+    // Exact Spring::timeStep ordering: position first, then stiffness + drag.
+    this.impactSpringY += this.impactSpringVelocity;
+    this.impactSpringVelocity -= IMPACT_SPRING_STIFFNESS * this.impactSpringY
+      + IMPACT_SPRING_DRAG * this.impactSpringVelocity;
   }
 
   private afterSwap(now: number): void {
@@ -1863,6 +1910,7 @@ export class CrackAttackEngine {
     }
     this.phase = "garbage";
     this.phaseUntil = initialFallUntil;
+    this.pendingGarbageImpactArea = width * height;
     this.events.push({ type: "garbage" });
     return true;
   }

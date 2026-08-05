@@ -1013,6 +1013,47 @@ test("incoming garbage hangs above the board and falls three ticks per row", () 
   );
 });
 
+test("initial garbage impact advances the original area-weighted spring at 50 Hz", () => {
+  const engine = new CrackAttackEngine({ seed: 0x48494a });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  for (let x = 0; x < BOARD_COLUMNS; x += 1) {
+    board[0][x] = block(9100 + x, (x % 5) as BlockFlavor);
+  }
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.lastUpdate = 1000;
+
+  assert.equal(internals.dropGarbage({
+    height: 3,
+    width: 2,
+    flavor: "normal",
+    source: "clear",
+    createdAt: 1000,
+    dropAt: 1000,
+  }, 1000), true);
+  const landingAt = internals.phaseUntil;
+  engine.drainEvents();
+
+  assert.equal(engine.getSnapshot(landingAt - 20).impactOffsetRows, 0);
+  engine.update(landingAt);
+  assert.ok(
+    Math.abs(engine.getSnapshot(landingAt).impactOffsetRows - (-0.06)) < 1e-12,
+    "the six-cell landing applies v=-0.12 and advances y on its impact tick",
+  );
+  assert.deepEqual(
+    engine.drainEvents().filter((event) => event.type === "garbage-impact"),
+    [{ type: "garbage-impact", area: 6 }],
+  );
+
+  engine.update(landingAt + 20);
+  assert.ok(
+    Math.abs(engine.getSnapshot(landingAt + 20).impactOffsetRows - (-0.108)) < 1e-12,
+    "the next tick uses the original stiffness and drag ordering",
+  );
+});
+
 test("holding raise advances complete rows and carries the cursor upward", () => {
   const engine = new CrackAttackEngine({ seed: 7 });
   engine.start(100);

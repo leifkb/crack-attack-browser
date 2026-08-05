@@ -147,9 +147,13 @@ function playEvent(rig: AudioRig | null, event: GameEvent): void {
   } else if (event.type === "chain") {
     tone(rig, 520 + event.depth * 80, 0.22, 0.04, 0, "sine");
     tone(rig, 780 + event.depth * 100, 0.24, 0.03, 0.09, "triangle");
-  } else if (event.type === "garbage") {
-    tone(rig, 105, 0.35, 0.055, 0, "sawtooth");
-    tone(rig, 72, 0.42, 0.04, 0.09, "square");
+  } else if (event.type === "garbage-impact") {
+    // Sound::play scales the original landing sample by garbage area, capped
+    // at ten cells. Keep that relative volume and trigger it on impact—not
+    // when the garbage merely enters above the board.
+    const impactVolume = Math.min(1, event.area / 10);
+    tone(rig, 105, 0.35, 0.055 * impactVolume, 0, "sawtooth");
+    tone(rig, 72, 0.42, 0.04 * impactVolume, 0.09, "square");
   } else if (event.type === "awaken") {
     tone(rig, 420 + event.flavor * 58, 0.1, 0.024, 0, "triangle");
     tone(rig, 650 + event.flavor * 52, 0.08, 0.016, 0.035, "sine");
@@ -548,7 +552,11 @@ export default function CrackAttackGame() {
     );
     const now = performance.now();
     const current = engine.getSnapshot(now);
-    const point = canvasPointToBoard(canvasPosition.x, canvasPosition.y, current.rise);
+    const point = canvasPointToBoard(
+      canvasPosition.x,
+      canvasPosition.y,
+      current.rise + current.impactOffsetRows,
+    );
     if (!point) return;
 
     const cursorX = Math.min(4, point.x);

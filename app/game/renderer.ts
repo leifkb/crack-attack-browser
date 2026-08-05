@@ -1196,7 +1196,11 @@ function drawWebGLBlocks(
 
   snapshot.nextRow.forEach((cell, x) => {
     if (!cell || cell.kind !== "block") return;
-    const position = logicalToScreen(x, -1, snapshot.rise);
+    const position = logicalToScreen(
+      x,
+      -1,
+      snapshot.rise + snapshot.impactOffsetRows,
+    );
     drawBlockToWebGL(layer, cell, position.x, position.y, now, true);
   });
 
@@ -1205,7 +1209,11 @@ function drawWebGLBlocks(
       const cell = snapshot.board[y][x];
       if (cell?.kind !== "block") continue;
       const motion = motionPosition(cell, x, y, now);
-      const position = logicalToScreen(motion.x, motion.y, snapshot.rise);
+      const position = logicalToScreen(
+        motion.x,
+        motion.y,
+        snapshot.rise + snapshot.impactOffsetRows,
+      );
       drawBlockToWebGL(layer, cell, position.x, position.y, now, false);
     }
   }
@@ -1217,7 +1225,11 @@ function drawWebGLBlocks(
     if (group.state === "shattering") {
       for (const { x, y, cell } of group.positions) {
         const motion = motionPosition(cell, x, y, now);
-        const position = logicalToScreen(motion.x, motion.y, snapshot.rise);
+        const position = logicalToScreen(
+          motion.x,
+          motion.y,
+          snapshot.rise + snapshot.impactOffsetRows,
+        );
         if (cell.shatterReforms) {
           drawBlockVisualToWebGL(
             layer,
@@ -1248,7 +1260,11 @@ function drawWebGLBlocks(
       );
       for (const { x, y, cell } of group.positions) {
         const motion = motionPosition(cell, x, y, now);
-        const position = logicalToScreen(motion.x, motion.y, snapshot.rise);
+        const position = logicalToScreen(
+          motion.x,
+          motion.y,
+          snapshot.rise + snapshot.impactOffsetRows,
+        );
         drawBlockVisualToWebGL(
           layer,
           retainedGarbageSectionVisual(
@@ -1433,7 +1449,12 @@ function calculateGarbageVisual(
 
   const centerScreenX = BOARD_X + (motion.x + widthCells / 2) * CELL_SIZE;
   const centerScreenY = BOARD_BOTTOM
-    - (motion.y + heightCells / 2 + snapshot.rise) * CELL_SIZE;
+    - (
+      motion.y
+      + heightCells / 2
+      + snapshot.rise
+      + snapshot.impactOffsetRows
+    ) * CELL_SIZE;
   const worldCenter = screenCenterToWorld(
     centerScreenX,
     centerScreenY,
@@ -1859,7 +1880,11 @@ function drawSwapperMesh(
 
 function drawCursor(context: CanvasRenderingContext2D, snapshot: GameSnapshot): void {
   if (snapshot.status !== "playing" && snapshot.status !== "countdown") return;
-  const position = logicalToScreen(snapshot.cursorRenderX, snapshot.cursorRenderY, snapshot.rise);
+  const position = logicalToScreen(
+    snapshot.cursorRenderX,
+    snapshot.cursorRenderY,
+    snapshot.rise + snapshot.impactOffsetRows,
+  );
   const centerX = position.x + CELL_SIZE;
   const centerY = position.y + CELL_SIZE / 2;
   drawSwapperMesh(
@@ -2183,7 +2208,11 @@ export function drawGame(
     if (!usedWebGL) {
       snapshot.nextRow.forEach((cell, x) => {
         if (!cell || cell.kind !== "block") return;
-        const position = logicalToScreen(x, -1, snapshot.rise);
+        const position = logicalToScreen(
+          x,
+          -1,
+          snapshot.rise + snapshot.impactOffsetRows,
+        );
         drawBlock(target, cell, assets, position.x, position.y, now, true);
       });
 
@@ -2191,7 +2220,11 @@ export function drawGame(
         if (group.state === "shattering") {
           for (const { x, y, cell } of group.positions) {
             const motion = motionPosition(cell, x, y, now);
-            const position = logicalToScreen(motion.x, motion.y, snapshot.rise);
+            const position = logicalToScreen(
+              motion.x,
+              motion.y,
+              snapshot.rise + snapshot.impactOffsetRows,
+            );
             if (cell.shatterReforms) {
               drawBlockVisual(
                 target,
@@ -2224,7 +2257,11 @@ export function drawGame(
           );
           for (const { x, y, cell } of group.positions) {
             const motion = motionPosition(cell, x, y, now);
-            const position = logicalToScreen(motion.x, motion.y, snapshot.rise);
+            const position = logicalToScreen(
+              motion.x,
+              motion.y,
+              snapshot.rise + snapshot.impactOffsetRows,
+            );
             drawBlockVisual(
               target,
               retainedGarbageSectionVisual(
@@ -2248,7 +2285,11 @@ export function drawGame(
           const cell = snapshot.board[y][x];
           if (cell?.kind !== "block") continue;
           const motion = motionPosition(cell, x, y, now);
-          const position = logicalToScreen(motion.x, motion.y, snapshot.rise);
+          const position = logicalToScreen(
+            motion.x,
+            motion.y,
+            snapshot.rise + snapshot.impactOffsetRows,
+          );
           drawBlock(target, cell, assets, position.x, position.y, now);
         }
       }
