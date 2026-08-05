@@ -12,6 +12,7 @@ import {
   CrackAttackEngine,
   DANGER_HIGH_ALERT_MS,
   DANGER_LOSS_DELAY_MS,
+  GAME_OVER_RESTART_DELAY_MS,
   GARBAGE_QUEUE_CAPACITY,
   LEVEL_LIGHT_FADE_MS,
   SWAP_DURATION_MS,
@@ -56,6 +57,7 @@ interface EngineHarness {
   backgroundFallUntil: number;
   dangerMs: number;
   elapsedMs: number;
+  gameOverAt: number;
   lastUpdate: number | null;
   simulationRemainderMs: number;
   phaseUntil: number;
@@ -450,6 +452,31 @@ test("falling alone does not pause the game-over clock", () => {
     1020,
     "only dying or awakening pieces freeze Creep::loss_alarm",
   );
+});
+
+test("restart input cannot erase the final score during the Game Over lockout", () => {
+  const engine = new CrackAttackEngine({ seed: 0x67616d65 });
+  const internals = harness(engine);
+  const gameOverAt = 10_000;
+  internals.status = "gameover";
+  internals.gameOverAt = gameOverAt;
+  internals.score = 4321;
+
+  assert.equal(
+    engine.start(gameOverAt + GAME_OVER_RESTART_DELAY_MS - 1, 0x6e6577),
+    false,
+  );
+  let snapshot = engine.getSnapshot(gameOverAt + GAME_OVER_RESTART_DELAY_MS - 1);
+  assert.equal(snapshot.status, "gameover");
+  assert.equal(snapshot.score, 4321, "an early restart attempt preserves the final score");
+
+  assert.equal(
+    engine.start(gameOverAt + GAME_OVER_RESTART_DELAY_MS, 0x6e6577),
+    true,
+  );
+  snapshot = engine.getSnapshot(gameOverAt + GAME_OVER_RESTART_DELAY_MS);
+  assert.equal(snapshot.status, "countdown");
+  assert.equal(snapshot.score, 0);
 });
 
 test("a slow frame catches up all original simulation time", () => {

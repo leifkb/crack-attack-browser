@@ -23,6 +23,8 @@ export const AWAKEN_POP_DURATION_MS = 240;
 export const CURSOR_MOVE_DURATION_MS = 120;
 export const COUNTDOWN_SEGMENT_MS = 50 * 20;
 export const COUNTDOWN_START_DELAY_MS = 150 * 20;
+// Keep the final score visible through the Game Over graphic's first landing.
+export const GAME_OVER_RESTART_DELAY_MS = 1500;
 // Crack Attack advances at 50 Hz and keeps dying blocks alive for 90 ticks.
 export const BLOCK_CLEAR_DURATION_MS = 90 * 20;
 export const DANGER_LOSS_DELAY_MS = 7000;
@@ -532,14 +534,18 @@ export class CrackAttackEngine {
     this.nextRow = this.generateCreepRow();
   }
 
-  start(now: number): void {
-    if (this.status !== "ready" && this.status !== "gameover") return;
-    if (this.status === "gameover") this.reset();
+  start(now: number, resetSeed?: number): boolean {
+    if (this.status !== "ready" && this.status !== "gameover") return false;
+    if (this.status === "gameover") {
+      if (now - this.gameOverAt < GAME_OVER_RESTART_DELAY_MS) return false;
+      this.reset(resetSeed);
+    }
     this.status = "countdown";
     this.countdownUntil = now + COUNTDOWN_START_DELAY_MS;
     this.lastUpdate = now;
     this.simulationRemainderMs = 0;
     this.syncLevelLights(now);
+    return true;
   }
 
   update(now: number): void {
