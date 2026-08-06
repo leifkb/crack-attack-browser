@@ -157,15 +157,236 @@ export interface DeathSpark {
 export interface RewardMote {
   id: number;
   style: SparkleStyle;
+  colorIndex: number;
   x: number;
   y: number;
-  outward: number;
+  velocityX: number;
+  velocityY: number;
   rotation: number;
+  initialRotation: number;
   angularVelocity: number;
   size: number;
+  inverseMass: number;
+  siblingDelayTicks: number;
   startedAt: number;
   launchAt: number;
   until: number;
+}
+
+export type RewardMoteColor = [number, number, number];
+
+// SparkleManager.cxx and DrawCandy.cxx use these level tables verbatim. Normal
+// magnitude rewards occupy levels 0..2, gray occupies level 3, and multiplier
+// rewards begin at level 11.
+const REWARD_MOTE_LEVEL_COLORS = [
+  0, 0, 0, 4, 5, 6, 7, 8, 9, 10, 11,
+  0, 0, 0, 1, 2, 3, 3, 3, 3, 3, 3,
+] as const;
+const REWARD_MOTE_LEVEL_STYLES: readonly SparkleStyle[] = [
+  "four", "five", "six", "special", "special", "special", "special",
+  "special", "special", "special", "special", "multiplier-one",
+  "multiplier-two", "multiplier-three", "multiplier-three",
+  "multiplier-three", "multiplier-three", "multiplier-three",
+  "multiplier-three", "multiplier-three", "multiplier-three",
+  "multiplier-three",
+];
+const REWARD_MOTE_LEVEL_SIZES = [
+  2, 2.8, 2.8, 3.4, 3.4, 3.4, 3.4, 3.4, 3.4, 3.4, 3.4,
+  4, 2.6, 3.5, 3.7, 3.9, 4.1, 4.3, 4.5, 4.7, 4.9, 5.1,
+] as const;
+const REWARD_MOTE_LEVEL_INVERSE_MASSES = [
+  1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+  1 / 1.4, 1 / 1.8, 1 / 2.2, 1 / 2.6,
+  1 / 3, 1 / 3.4, 1 / 3.8, 1 / 4.2,
+] as const;
+
+export const REWARD_MOTE_PALETTE: readonly RewardMoteColor[] = [
+  [1, 0, 0],
+  [0.9, 0.4, 0],
+  [0.8, 0.8, 0],
+  [0.3, 0.3, 1],
+  [0.4, 0.4, 0.4],
+  [0, 0, 0],
+  [0.9, 0.9, 0.9],
+  [0.73, 0, 0.73],
+  [0.2, 0.2, 0.8],
+  [0, 0.6, 0.05],
+  [0.85, 0.85, 0],
+  [1, 0.4, 0],
+];
+
+export const REWARD_MOTE_HOLD_MS = 90 * SIMULATION_STEP_MS;
+export const REWARD_MOTE_SIBLING_DELAY_MS = 25 * SIMULATION_STEP_MS;
+
+export interface RewardMoteDefinition {
+  originalLevel: number;
+  style: SparkleStyle;
+  colorIndex: number;
+  size: number;
+  inverseMass: number;
+}
+
+export interface RewardMoteVisual {
+  active: boolean;
+  x: number;
+  y: number;
+  rotation: number;
+  alpha: number;
+  color: RewardMoteColor;
+}
+
+interface RewardMoteState {
+  active: boolean;
+  x: number;
+  y: number;
+  velocityX: number;
+  velocityY: number;
+  rotation: number;
+  angularVelocity: number;
+  lifeTime: number;
+}
+
+export function rewardMoteDefinition(
+  kind: "magnitude" | "multiplier",
+  level: number,
+): RewardMoteDefinition {
+  const originalLevel = Math.max(
+    0,
+    Math.min(REWARD_MOTE_LEVEL_STYLES.length - 1, kind === "multiplier" ? level + 9 : level),
+  );
+  return {
+    originalLevel,
+    style: REWARD_MOTE_LEVEL_STYLES[originalLevel],
+    colorIndex: REWARD_MOTE_LEVEL_COLORS[originalLevel],
+    size: REWARD_MOTE_LEVEL_SIZES[originalLevel],
+    inverseMass: REWARD_MOTE_LEVEL_INVERSE_MASSES[originalLevel],
+  };
+}
+
+function initialRewardMoteState(mote: RewardMote): RewardMoteState {
+  return {
+    active: true,
+    x: mote.x,
+    y: mote.y,
+    velocityX: mote.velocityX,
+    velocityY: mote.velocityY,
+    rotation: mote.rotation,
+    angularVelocity: mote.angularVelocity,
+    lifeTime: 0,
+  };
+}
+
+function advanceRewardMote(mote: RewardMote, state: RewardMoteState): RewardMoteState {
+  if (!state.active) return state;
+  let {
+    x,
+    y,
+    velocityX,
+    velocityY,
+    rotation,
+    angularVelocity,
+    lifeTime,
+  } = state;
+
+  if (lifeTime >= 0) {
+    lifeTime += 1;
+    if (lifeTime - mote.siblingDelayTicks < 90) {
+      rotation += angularVelocity;
+      return {
+        active: true,
+        x,
+        y,
+        velocityX,
+        velocityY,
+        rotation,
+        angularVelocity,
+        lifeTime,
+      };
+    }
+    lifeTime = -1;
+  } else if (mote.colorIndex > 0 && mote.colorIndex < 4) {
+    lifeTime -= 1;
+  }
+
+  // SparkleManager moves first, then applies its upward force, center spring,
+  // drag, and angular spring. One browser row is two original GL units.
+  y += velocityY;
+  if (y > 16 + mote.size * 0.05) {
+    return {
+      active: false,
+      x,
+      y,
+      velocityX,
+      velocityY,
+      rotation,
+      angularVelocity,
+      lifeTime,
+    };
+  }
+  x += velocityX;
+  rotation += angularVelocity;
+  velocityY += mote.inverseMass * 0.002 - 0.005 * velocityY;
+  velocityX -= mote.inverseMass * 0.005 * (x - BOARD_COLUMNS / 2)
+    + 0.005 * velocityX;
+  angularVelocity -= mote.inverseMass * 0.0008 * (rotation - mote.initialRotation);
+
+  return {
+    active: true,
+    x,
+    y,
+    velocityX,
+    velocityY,
+    rotation,
+    angularVelocity,
+    lifeTime,
+  };
+}
+
+function rewardMoteColor(mote: RewardMote, lifeTime: number): RewardMoteColor {
+  const target = REWARD_MOTE_PALETTE[mote.colorIndex] ?? REWARD_MOTE_PALETTE[0];
+  if (mote.colorIndex > 0 && mote.colorIndex < 4) {
+    const red = REWARD_MOTE_PALETTE[0];
+    if (lifeTime >= 0 && lifeTime < 90) return [...red];
+    if (lifeTime > -50) {
+      const fade = -lifeTime / 50;
+      return [
+        red[0] + (target[0] - red[0]) * fade,
+        red[1] + (target[1] - red[1]) * fade,
+        red[2] + (target[2] - red[2]) * fade,
+      ];
+    }
+  }
+  return [...target];
+}
+
+function rewardMoteStateAt(mote: RewardMote, now: number): RewardMoteState {
+  const elapsedTicks = Math.floor(Math.max(0, now - mote.startedAt) / SIMULATION_STEP_MS);
+  let state = initialRewardMoteState(mote);
+  for (let tick = 0; tick < elapsedTicks && state.active; tick += 1) {
+    state = advanceRewardMote(mote, state);
+  }
+  return state;
+}
+
+export function rewardMoteVisualAt(mote: RewardMote, now: number): RewardMoteVisual {
+  const state = rewardMoteStateAt(mote, now);
+  return {
+    active: state.active,
+    x: state.x,
+    y: state.y,
+    rotation: state.rotation,
+    alpha: state.lifeTime >= 0 && state.lifeTime < 90 ? state.lifeTime / 90 : 1,
+    color: rewardMoteColor(mote, state.lifeTime),
+  };
+}
+
+function rewardMoteEndTime(mote: RewardMote): number {
+  let state = initialRewardMoteState(mote);
+  for (let tick = 1; tick <= 2000; tick += 1) {
+    state = advanceRewardMote(mote, state);
+    if (!state.active) return mote.startedAt + tick * SIMULATION_STEP_MS;
+  }
+  return mote.startedAt + 2000 * SIMULATION_STEP_MS;
 }
 
 export interface AttackPayload {
@@ -1101,7 +1322,8 @@ export class CrackAttackEngine {
         const depth = previousDepth + index + 1;
         this.events.push({ type: "chain", depth });
         this.createRewardSign("multiplier", depth, pattern.anchor, now, index);
-        this.createRewardMote("multiplier", pattern.anchor, depth, now, 620, index);
+        // ComboTabulator creates every multiplier mote without sibling delay.
+        this.createRewardMote("multiplier", pattern.anchor, depth, now, 0);
       });
     }
 
@@ -1167,20 +1389,23 @@ export class CrackAttackEngine {
     });
 
     const signAnchor = effectivePatterns[effectivePatterns.length - 1].anchor;
-    let moteSibling = multiplierIncrements;
+    // GarbageGenerator creates the sign before queueing garbage and its mote.
+    // That order matters because all three consume the shared random stream.
+    if (totalMagnitude > 3) {
+      this.createRewardSign("magnitude", totalMagnitude, signAnchor, now, multiplierIncrements);
+    }
+    let moteSibling = combo.multiplier > 1 ? 1 : 0;
     for (const attack of magnitudeAttacks(normalMagnitude, now)) {
+      this.emitAttack(attack);
       this.createRewardMote(
         "magnitude",
         signAnchor,
         Math.max(0, Math.min(3, attack.width - 3)),
         now,
-        620,
         moteSibling++,
       );
-      this.emitAttack(attack);
     }
     for (let n = 0; n < Math.max(0, grayMagnitude - 2); n += 1) {
-      this.createRewardMote("magnitude", signAnchor, 3, now, 620, moteSibling++);
       this.emitAttack({
         height: 1,
         width: BOARD_COLUMNS,
@@ -1188,10 +1413,7 @@ export class CrackAttackEngine {
         source: "clear",
         createdAt: now,
       });
-    }
-
-    if (totalMagnitude > 3) {
-      this.createRewardSign("magnitude", totalMagnitude, signAnchor, now, multiplierIncrements);
+      this.createRewardMote("magnitude", signAnchor, 3, now, moteSibling++);
     }
     // The original deliberately shows no sign at all for an ordinary match
     // of three; points still accrue in the score display.
@@ -2385,43 +2607,38 @@ export class CrackAttackEngine {
     anchor: Coordinate,
     level: number,
     now: number,
-    holdMs: number,
     sibling: number,
   ): void {
-    const magnitudeStyles: SparkleStyle[] = ["four", "five", "six", "special"];
-    let style: SparkleStyle;
-    let size: number;
-    if (kind === "multiplier") {
-      if (level <= 2) {
-        style = "multiplier-one";
-        size = 42;
-      } else if (level === 3) {
-        style = "multiplier-two";
-        size = 30;
-      } else {
-        style = "multiplier-three";
-        size = Math.min(54, 37 + (level - 4) * 3);
-      }
-    } else {
-      const clampedLevel = Math.max(0, Math.min(3, level));
-      style = magnitudeStyles[clampedLevel];
-      size = [22, 30, 30, 36][clampedLevel];
-    }
-    const launchAt = now + holdMs + sibling * 140;
-    const sourceX = anchor.x + 0.5;
-    this.rewardMotes.push({
+    const definition = rewardMoteDefinition(kind, level);
+    const sourceX = anchor.x + Math.floor(this.random() * 20) / 20;
+    const sourceY = anchor.y + this.rise + Math.floor(this.random() * 20) / 20;
+    const speed = (0.18 + this.random() * 0.04) * definition.inverseMass / 2;
+    const rotation = Math.floor(this.random() * 360) * Math.PI / 180;
+    let angularVelocity = (2 + this.random() * 2)
+      * definition.inverseMass * Math.PI / 180;
+    if (this.random() < 0.5) angularVelocity = -angularVelocity;
+    const siblingDelayTicks = sibling * 25;
+    const mote: RewardMote = {
       id: this.nextEffectId++,
-      style,
+      style: definition.style,
+      colorIndex: definition.colorIndex,
       x: sourceX,
-      y: anchor.y + 0.5 + this.rise,
-      outward: (sourceX < BOARD_COLUMNS / 2 ? -1 : 1) * (0.75 + this.random() * 0.45),
-      rotation: this.random() * Math.PI * 2,
-      angularVelocity: (this.random() < 0.5 ? -1 : 1) * (1.6 + this.random() * 2.4),
-      size,
+      y: sourceY,
+      velocityX: (anchor.x < BOARD_COLUMNS / 2 ? -1 : 1) * 0.707107 * speed,
+      velocityY: -0.707107 * speed,
+      rotation,
+      initialRotation: rotation,
+      angularVelocity,
+      size: definition.size,
+      inverseMass: definition.inverseMass,
+      siblingDelayTicks,
       startedAt: now,
-      launchAt,
-      until: launchAt + 1850,
-    });
+      launchAt: now + REWARD_MOTE_HOLD_MS
+        + sibling * REWARD_MOTE_SIBLING_DELAY_MS,
+      until: Number.POSITIVE_INFINITY,
+    };
+    mote.until = rewardMoteEndTime(mote);
+    this.rewardMotes.push(mote);
   }
 
   private pruneEffects(now: number): void {

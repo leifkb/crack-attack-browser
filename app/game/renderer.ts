@@ -12,8 +12,10 @@ import {
   DEATH_SPARK_GRAVITY,
   DANGER_HIGH_ALERT_MS,
   DANGER_LOSS_DELAY_MS,
+  REWARD_MOTE_PALETTE,
   REWARD_SIGN_LIFETIME_MS,
   VISIBLE_ROWS,
+  rewardMoteVisualAt,
   type BlockCell,
   type Cell,
   type DeathSpark,
@@ -101,7 +103,6 @@ const GARBAGE_COLORS: Record<"normal" | "gray", Color3> = {
   gray: [0.4, 0.4, 0.4],
 };
 const HUD_STAR_COLOR: Color3 = [0.4, 0.4, 0.7];
-const REWARD_STAR_COLOR: Color3 = [0.62, 0.64, 1];
 const WHITE_STAR_COLOR: Color3 = [1, 1, 1];
 
 const BLOCK_MESH_SIZE = CELL_SIZE * (42 / 52);
@@ -116,7 +117,7 @@ let frameContext: CanvasRenderingContext2D | null = null;
 let blockWebGLLayer: BlockWebGLLayer | null = null;
 let blockWebGLAttempted = false;
 const sparkleTextureCache = new Map<string, HTMLCanvasElement>();
-const MAX_SPARKLE_TEXTURE_CACHE = 32;
+const MAX_SPARKLE_TEXTURE_CACHE = 96;
 const DEATH_SPARK_SHADOW_THRESHOLD = 72;
 
 function clamp(value: number, min = 0, max = 1): number {
@@ -464,15 +465,18 @@ export function prepareSparkleTextures(): void {
   for (const color of BLOCK_COLORS) sparkleTexture("four", color);
   sparkleTexture("four", WHITE_STAR_COLOR);
   sparkleTexture("five", HUD_STAR_COLOR);
-  for (const style of [
-    "four",
-    "five",
-    "six",
-    "special",
-    "multiplier-one",
-    "multiplier-two",
-    "multiplier-three",
-  ] as const) sparkleTexture(style, REWARD_STAR_COLOR);
+  for (const [style, colorIndex] of [
+    ["four", 0],
+    ["five", 0],
+    ["six", 0],
+    ["special", 4],
+    ["multiplier-one", 0],
+    ["multiplier-two", 0],
+    ["multiplier-three", 0],
+    ["multiplier-three", 1],
+    ["multiplier-three", 2],
+    ["multiplier-three", 3],
+  ] as const) sparkleTexture(style, [...REWARD_MOTE_PALETTE[colorIndex]]);
 }
 
 function drawSparkle(
@@ -1969,62 +1973,22 @@ function drawDeathSparks(
   context.restore();
 }
 
-function cubicBezier(
-  start: number,
-  controlOne: number,
-  controlTwo: number,
-  end: number,
-  amount: number,
-): number {
-  const inverse = 1 - amount;
-  return inverse ** 3 * start
-    + 3 * inverse ** 2 * amount * controlOne
-    + 3 * inverse * amount ** 2 * controlTwo
-    + amount ** 3 * end;
-}
-
 function drawRewardMote(
   context: CanvasRenderingContext2D,
   mote: RewardMote,
   now: number,
 ): void {
-  const startX = BOARD_X + mote.x * CELL_SIZE;
-  const startY = BOARD_BOTTOM - mote.y * CELL_SIZE;
-  const endX = BOARD_X + BOARD_WIDTH / 2;
-  const endY = BOARD_TOP - 64;
-  const holdDuration = Math.max(1, mote.launchAt - mote.startedAt);
-  const flightDuration = Math.max(1, mote.until - mote.launchAt);
-  let x = startX;
-  let y = startY;
-  let alpha = clamp((now - mote.startedAt) / Math.min(260, holdDuration));
-  let flight = 0;
-
-  if (now >= mote.launchAt) {
-    flight = clamp((now - mote.launchAt) / flightDuration);
-    const outwardPixels = mote.outward * CELL_SIZE;
-    x = cubicBezier(
-      startX,
-      startX + outwardPixels * 1.35,
-      endX + outwardPixels * 0.72,
-      endX,
-      flight,
-    );
-    y = cubicBezier(startY, startY - 92, BOARD_TOP + 128, endY, flight);
-    if (flight > 0.84) alpha *= (1 - flight) / 0.16;
-  }
-
-  const rotation = mote.rotation
-    + mote.angularVelocity * Math.max(0, now - mote.startedAt) / 1000;
-  const pulse = 1 + 0.07 * Math.sin((now - mote.startedAt) / 85);
+  const visual = rewardMoteVisualAt(mote, now);
+  if (!visual.active) return;
   drawSparkle(
     context,
     mote.style,
-    REWARD_STAR_COLOR,
-    x,
-    y,
-    mote.size * pulse,
-    rotation,
-    alpha,
+    visual.color,
+    BOARD_X + visual.x * CELL_SIZE,
+    BOARD_BOTTOM - visual.y * CELL_SIZE,
+    mote.size * (CELL_SIZE / 5),
+    visual.rotation,
+    visual.alpha,
     6,
   );
 }
