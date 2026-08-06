@@ -3,6 +3,26 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const styles = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+const gameComponent = readFileSync(
+  new URL("../app/game/CrackAttackGame.tsx", import.meta.url),
+  "utf8",
+);
+
+test("directional feedback follows explicit pointer state instead of sticky pseudostates", () => {
+  assert.match(
+    styles,
+    /\.pad-zone\.is-pressed\s*\{[^}]*background:\s*rgba\(120, 137, 235, 0\.08\);[^}]*color:\s*#ffffff;/s,
+  );
+  assert.doesNotMatch(styles, /\.pad-zone:(?:hover|active)/);
+  assert.match(
+    gameComponent,
+    /pressedDirection:\s*gesture\.movedCursor \? null : gesture\.tapDirection/,
+  );
+  assert.match(
+    gameComponent,
+    /thumbpadVisual\.pressedDirection === "up" \? " is-pressed" : ""/,
+  );
+});
 
 test("landscape touch controls override the runtime flex layout with a sized grid", () => {
   const landscapeStart = styles.indexOf(

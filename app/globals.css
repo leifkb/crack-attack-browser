@@ -388,8 +388,7 @@ canvas:focus-visible {
   transform: translateY(-50%);
 }
 
-.pad-zone:hover,
-.pad-zone:active {
+.pad-zone.is-pressed {
   background: rgba(120, 137, 235, 0.08);
   color: #ffffff;
 }

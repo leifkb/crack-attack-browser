@@ -84,16 +84,40 @@ interface CanvasGesture {
   startRow: number;
 }
 
+type PadDirection = "up" | "right" | "down" | "left";
+
 interface ThumbpadGesture {
   pointerId: number;
   pointerType: string;
   tapDx: number;
   tapDy: number;
+  tapDirection: PadDirection | null;
   lastClientX: number;
   lastClientY: number;
   accumulatedX: number;
   accumulatedY: number;
   movedCursor: boolean;
+}
+
+interface ThumbpadVisual {
+  active: boolean;
+  pressedDirection: PadDirection | null;
+  x: number;
+  y: number;
+}
+
+const IDLE_THUMBPAD_VISUAL: ThumbpadVisual = {
+  active: false,
+  pressedDirection: null,
+  x: 0,
+  y: 0,
+};
+
+function padDirection(value: string | undefined): PadDirection | null {
+  if (value === "up" || value === "right" || value === "down" || value === "left") {
+    return value;
+  }
+  return null;
 }
 
 function tactileTick(duration = 7): void {
@@ -309,7 +333,7 @@ export default function CrackAttackGame() {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [visualReady, setVisualReady] = useState(false);
   const [touchControlsAvailable, setTouchControlsAvailable] = useState(false);
-  const [thumbpadVisual, setThumbpadVisual] = useState({ active: false, x: 0, y: 0 });
+  const [thumbpadVisual, setThumbpadVisual] = useState<ThumbpadVisual>(IDLE_THUMBPAD_VISUAL);
 
   const ensureAudio = useCallback(() => {
     if (!audioRef.current) {
@@ -573,7 +597,7 @@ export default function CrackAttackGame() {
       }
       if (thumbpadGestureRef.current?.pointerId === event.pointerId) {
         thumbpadGestureRef.current = null;
-        setThumbpadVisual({ active: false, x: 0, y: 0 });
+        setThumbpadVisual(IDLE_THUMBPAD_VISUAL);
       }
       if (canvasGestureRef.current?.pointerId === event.pointerId) {
         canvasGestureRef.current = null;
@@ -584,7 +608,7 @@ export default function CrackAttackGame() {
       thumbpadGestureRef.current = null;
       canvasGestureRef.current = null;
       engine.setRaiseHeld(false);
-      setThumbpadVisual({ active: false, x: 0, y: 0 });
+      setThumbpadVisual(IDLE_THUMBPAD_VISUAL);
     };
     window.addEventListener("pointerup", cancelPointer);
     window.addEventListener("pointercancel", cancelPointer);
@@ -725,18 +749,20 @@ export default function CrackAttackGame() {
     if (thumbpadGestureRef.current) return;
     ensureAudio();
     const zone = (event.target as HTMLElement).closest<HTMLElement>("[data-pad-dx]");
+    const tapDirection = padDirection(zone?.dataset.padDirection);
     thumbpadGestureRef.current = {
       pointerId: event.pointerId,
       pointerType: event.pointerType,
       tapDx: Number(zone?.dataset.padDx ?? 0),
       tapDy: Number(zone?.dataset.padDy ?? 0),
+      tapDirection,
       lastClientX: event.clientX,
       lastClientY: event.clientY,
       accumulatedX: 0,
       accumulatedY: 0,
       movedCursor: false,
     };
-    setThumbpadVisual({ active: true, x: 0, y: 0 });
+    setThumbpadVisual({ active: true, pressedDirection: tapDirection, x: 0, y: 0 });
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
@@ -775,6 +801,7 @@ export default function CrackAttackGame() {
 
     setThumbpadVisual({
       active: true,
+      pressedDirection: gesture.movedCursor ? null : gesture.tapDirection,
       x: Math.max(
         -THUMBPAD_PUCK_RANGE_PX,
         Math.min(
@@ -797,7 +824,7 @@ export default function CrackAttackGame() {
     const gesture = thumbpadGestureRef.current;
     if (!gesture || gesture.pointerId !== event.pointerId) return;
     thumbpadGestureRef.current = null;
-    setThumbpadVisual({ active: false, x: 0, y: 0 });
+    setThumbpadVisual(IDLE_THUMBPAD_VISUAL);
     if (!gesture.movedCursor && (gesture.tapDx !== 0 || gesture.tapDy !== 0)) {
       move(gesture.tapDx, gesture.tapDy);
       if (gesture.pointerType !== "mouse") tactileTick();
@@ -822,7 +849,7 @@ export default function CrackAttackGame() {
   const cancelThumbpadGesture = (event: React.PointerEvent<HTMLDivElement>) => {
     if (thumbpadGestureRef.current?.pointerId !== event.pointerId) return;
     thumbpadGestureRef.current = null;
-    setThumbpadVisual({ active: false, x: 0, y: 0 });
+    setThumbpadVisual(IDLE_THUMBPAD_VISUAL);
   };
 
   const pressRaise = (event: React.PointerEvent<HTMLButtonElement>) => {
@@ -1000,33 +1027,45 @@ export default function CrackAttackGame() {
               <span className="gesture-pad-name" aria-hidden="true">Glide</span>
               <button
                 type="button"
-                className="pad-zone pad-up"
+                className={`pad-zone pad-up${
+                  thumbpadVisual.pressedDirection === "up" ? " is-pressed" : ""
+                }`}
                 data-pad-dx="0"
                 data-pad-dy="1"
+                data-pad-direction="up"
                 aria-label="Move cursor up"
                 onClick={() => tapMove(0, 1)}
               ><span aria-hidden="true">▲</span></button>
               <button
                 type="button"
-                className="pad-zone pad-right"
+                className={`pad-zone pad-right${
+                  thumbpadVisual.pressedDirection === "right" ? " is-pressed" : ""
+                }`}
                 data-pad-dx="1"
                 data-pad-dy="0"
+                data-pad-direction="right"
                 aria-label="Move cursor right"
                 onClick={() => tapMove(1, 0)}
               ><span aria-hidden="true">▶</span></button>
               <button
                 type="button"
-                className="pad-zone pad-down"
+                className={`pad-zone pad-down${
+                  thumbpadVisual.pressedDirection === "down" ? " is-pressed" : ""
+                }`}
                 data-pad-dx="0"
                 data-pad-dy="-1"
+                data-pad-direction="down"
                 aria-label="Move cursor down"
                 onClick={() => tapMove(0, -1)}
               ><span aria-hidden="true">▼</span></button>
               <button
                 type="button"
-                className="pad-zone pad-left"
+                className={`pad-zone pad-left${
+                  thumbpadVisual.pressedDirection === "left" ? " is-pressed" : ""
+                }`}
                 data-pad-dx="-1"
                 data-pad-dy="0"
+                data-pad-direction="left"
                 aria-label="Move cursor left"
                 onClick={() => tapMove(-1, 0)}
               ><span aria-hidden="true">◀</span></button>
