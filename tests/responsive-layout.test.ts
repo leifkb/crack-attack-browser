@@ -3,6 +3,25 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const styles = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
+const gameComponent = readFileSync(
+  new URL("../app/game/CrackAttackGame.tsx", import.meta.url),
+  "utf8",
+);
+
+test("a real glide neutralizes the directional press highlight", () => {
+  assert.match(
+    styles,
+    /\.gesture-pad\.is-gliding \.pad-zone\s*\{[^}]*background:\s*transparent;[^}]*color:\s*#7f8ab8;/s,
+  );
+  assert.match(
+    gameComponent,
+    /gliding:\s*gesture\.movedCursor/,
+  );
+  assert.match(
+    gameComponent,
+    /thumbpadVisual\.gliding \? " is-gliding" : ""/,
+  );
+});
 
 test("landscape touch controls override the runtime flex layout with a sized grid", () => {
   const landscapeStart = styles.indexOf(

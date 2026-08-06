@@ -309,7 +309,12 @@ export default function CrackAttackGame() {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [visualReady, setVisualReady] = useState(false);
   const [touchControlsAvailable, setTouchControlsAvailable] = useState(false);
-  const [thumbpadVisual, setThumbpadVisual] = useState({ active: false, x: 0, y: 0 });
+  const [thumbpadVisual, setThumbpadVisual] = useState({
+    active: false,
+    gliding: false,
+    x: 0,
+    y: 0,
+  });
 
   const ensureAudio = useCallback(() => {
     if (!audioRef.current) {
@@ -573,7 +578,7 @@ export default function CrackAttackGame() {
       }
       if (thumbpadGestureRef.current?.pointerId === event.pointerId) {
         thumbpadGestureRef.current = null;
-        setThumbpadVisual({ active: false, x: 0, y: 0 });
+        setThumbpadVisual({ active: false, gliding: false, x: 0, y: 0 });
       }
       if (canvasGestureRef.current?.pointerId === event.pointerId) {
         canvasGestureRef.current = null;
@@ -584,7 +589,7 @@ export default function CrackAttackGame() {
       thumbpadGestureRef.current = null;
       canvasGestureRef.current = null;
       engine.setRaiseHeld(false);
-      setThumbpadVisual({ active: false, x: 0, y: 0 });
+      setThumbpadVisual({ active: false, gliding: false, x: 0, y: 0 });
     };
     window.addEventListener("pointerup", cancelPointer);
     window.addEventListener("pointercancel", cancelPointer);
@@ -736,7 +741,7 @@ export default function CrackAttackGame() {
       accumulatedY: 0,
       movedCursor: false,
     };
-    setThumbpadVisual({ active: true, x: 0, y: 0 });
+    setThumbpadVisual({ active: true, gliding: false, x: 0, y: 0 });
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
@@ -775,6 +780,7 @@ export default function CrackAttackGame() {
 
     setThumbpadVisual({
       active: true,
+      gliding: gesture.movedCursor,
       x: Math.max(
         -THUMBPAD_PUCK_RANGE_PX,
         Math.min(
@@ -797,7 +803,7 @@ export default function CrackAttackGame() {
     const gesture = thumbpadGestureRef.current;
     if (!gesture || gesture.pointerId !== event.pointerId) return;
     thumbpadGestureRef.current = null;
-    setThumbpadVisual({ active: false, x: 0, y: 0 });
+    setThumbpadVisual({ active: false, gliding: false, x: 0, y: 0 });
     if (!gesture.movedCursor && (gesture.tapDx !== 0 || gesture.tapDy !== 0)) {
       move(gesture.tapDx, gesture.tapDy);
       if (gesture.pointerType !== "mouse") tactileTick();
@@ -822,7 +828,7 @@ export default function CrackAttackGame() {
   const cancelThumbpadGesture = (event: React.PointerEvent<HTMLDivElement>) => {
     if (thumbpadGestureRef.current?.pointerId !== event.pointerId) return;
     thumbpadGestureRef.current = null;
-    setThumbpadVisual({ active: false, x: 0, y: 0 });
+    setThumbpadVisual({ active: false, gliding: false, x: 0, y: 0 });
   };
 
   const pressRaise = (event: React.PointerEvent<HTMLButtonElement>) => {
@@ -983,7 +989,9 @@ export default function CrackAttackGame() {
             aria-describedby="touch-control-hint"
           >
             <div
-              className={`gesture-pad${thumbpadVisual.active ? " is-active" : ""}`}
+              className={`gesture-pad${thumbpadVisual.active ? " is-active" : ""}${
+                thumbpadVisual.gliding ? " is-gliding" : ""
+              }`}
               onPointerDown={handleThumbpadPointerDown}
               onPointerMove={handleThumbpadPointerMove}
               onPointerUp={finishThumbpadGesture}

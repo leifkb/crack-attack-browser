@@ -394,6 +394,11 @@ canvas:focus-visible {
   color: #ffffff;
 }
 
+.gesture-pad.is-gliding .pad-zone {
+  background: transparent;
+  color: #7f8ab8;
+}
+
 .gesture-pad-puck {
   position: absolute;
   z-index: 3;
