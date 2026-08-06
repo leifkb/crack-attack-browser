@@ -768,7 +768,9 @@ canvas:focus-visible {
   }
 
   .game-controls {
+    width: min(560px, 100%);
     align-self: center;
+    justify-self: center;
   }
 
   .touch-hint {
@@ -778,22 +780,24 @@ canvas:focus-visible {
     line-height: 1.35;
   }
 
-  .touch-console {
+  .touch-console,
+  .game-experience[data-touch-controls="true"] .touch-console {
     display: grid;
-    grid-template-columns: minmax(130px, 1.35fr) repeat(2, minmax(66px, 0.75fr));
+    grid-template-columns: minmax(120px, 1.35fr) repeat(2, minmax(64px, 0.75fr));
+    justify-content: stretch;
     gap: 6px;
     margin: 0;
   }
 
   .gesture-pad,
   .console-button {
-    width: auto;
+    width: 100%;
     min-width: 0;
     min-height: min(94px, 26dvh);
   }
 
   .gesture-pad {
-    flex-basis: auto;
+    flex: none;
     border-radius: 18px;
   }
 
