@@ -9,6 +9,7 @@ import {
   BOARD_COLUMNS,
   COUNTDOWN_SEGMENT_MS,
   COUNTDOWN_START_DELAY_MS,
+  CURSOR_MOVE_DURATION_MS,
   CrackAttackEngine,
   DANGER_HIGH_ALERT_MS,
   DANGER_LOSS_DELAY_MS,
@@ -19,6 +20,7 @@ import {
   VISIBLE_ROWS,
   baseScoreFor,
   createEmptyBoard,
+  creepRowsPerSecond,
   findMatchCoordinates,
   findMatches,
   magnitudeAttacks,
@@ -479,6 +481,26 @@ test("restart input cannot erase the final score during the Game Over lockout", 
   assert.equal(snapshot.score, 0);
 });
 
+test("the first run can be reseeded just like later runs", () => {
+  const engine = new CrackAttackEngine({ seed: 0x11111111 });
+  const expected = new CrackAttackEngine({ seed: 0x22222222 });
+  const expectedSnapshot = expected.getSnapshot(0);
+  const layout = (board: Board) => board.map((row) => row.map((cell) => (
+    cell?.kind === "block" ? cell.flavor : cell?.kind ?? null
+  )));
+
+  assert.equal(engine.start(100, 0x22222222), true);
+  const snapshot = engine.getSnapshot(100);
+  assert.deepEqual(layout(snapshot.board), layout(expectedSnapshot.board));
+  assert.deepEqual(
+    snapshot.nextRow.map((cell) => cell?.kind === "block" ? cell.flavor : cell?.kind ?? null),
+    expectedSnapshot.nextRow.map((cell) => (
+      cell?.kind === "block" ? cell.flavor : cell?.kind ?? null
+    )),
+  );
+  assert.equal(snapshot.status, "countdown");
+});
+
 test("a slow frame catches up all original simulation time", () => {
   const engine = new CrackAttackEngine({ seed: 0x717273 });
   const internals = harness(engine);
@@ -493,6 +515,18 @@ test("a slow frame catches up all original simulation time", () => {
   const snapshot = engine.getSnapshot(1200);
   assert.equal(snapshot.elapsedMs, 200);
   assert.ok(Math.abs(snapshot.rise - (20 / 1440) * 0.2) < 1e-9);
+});
+
+test("manual raise keeps accelerating after normal creep passes its original floor", () => {
+  assert.equal(creepRowsPerSecond(0, false), 20 / 1440);
+  assert.equal(creepRowsPerSecond(0, true), 2.5);
+  assert.equal(creepRowsPerSecond(590_000, true), 2.5);
+  assert.equal(creepRowsPerSecond(600_000, true), 1220 / 480);
+  assert.equal(creepRowsPerSecond(2_000_000, true), 5);
+  assert.equal(
+    creepRowsPerSecond(2_000_000, true),
+    creepRowsPerSecond(2_000_000, false) * 3,
+  );
 });
 
 test("sub-tick wall time is retained until a complete original step", () => {
@@ -1151,6 +1185,79 @@ test("cursor movement glides with the original quadratic timing", () => {
   snapshot = engine.getSnapshot(3220);
   assert.equal(snapshot.cursorRenderX, 3);
   assert.equal(snapshot.cursorRenderY, 4);
+});
+
+test("rapid cursor commands queue one step until the original move pause ends", () => {
+  const engine = new CrackAttackEngine({ seed: 19 });
+  const internals = harness(engine);
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.lastUpdate = 1000;
+
+  engine.moveCursor(1, 0, 1000);
+  engine.moveCursor(1, 0, 1001);
+  let snapshot = engine.getSnapshot(1001);
+  assert.equal(snapshot.cursorX, 3, "the second command waits instead of teleporting");
+
+  engine.update(1000 + CURSOR_MOVE_DURATION_MS - 1);
+  assert.equal(engine.getSnapshot(1119).cursorX, 3);
+
+  engine.update(1000 + CURSOR_MOVE_DURATION_MS);
+  snapshot = engine.getSnapshot(1120);
+  assert.equal(snapshot.cursorX, 4, "the queued command begins at the pause boundary");
+  assert.equal(snapshot.cursorRenderX, 3, "the queued step starts a second visible glide");
+});
+
+test("a queued swap supersedes movement and waits for the cursor to arrive", () => {
+  const engine = new CrackAttackEngine({ seed: 20 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  board[4][3] = block(1, 0);
+  board[4][4] = block(2, 1);
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.lastUpdate = 1000;
+
+  engine.moveCursor(1, 0, 1000);
+  engine.moveCursor(0, -1, 1001);
+  assert.equal(engine.swap(1002), true, "the swap command is accepted into the queue");
+  assert.equal(engine.drainEvents().length, 0, "no swap happens mid-glide");
+
+  engine.update(1000 + CURSOR_MOVE_DURATION_MS);
+  const snapshot = engine.getSnapshot(1120);
+  assert.equal(snapshot.cursorX, 3);
+  assert.equal(snapshot.cursorY, 4, "the earlier queued move was discarded");
+  assert.equal((snapshot.board[4][3] as BlockCell).id, 2);
+  assert.equal((snapshot.board[4][4] as BlockCell).id, 1);
+  assert.ok(engine.drainEvents().some((event) => event.type === "swap"));
+});
+
+test("score display rolls through earned points on the desktop cadence", () => {
+  const engine = new CrackAttackEngine({ seed: 21 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  board[2][0] = block(1, 3);
+  board[2][1] = block(2, 3);
+  board[2][2] = block(3, 3);
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.lastUpdate = 1000;
+  internals.startClear([{ x: 0, y: 2 }, { x: 1, y: 2 }, { x: 2, y: 2 }], false, 1000);
+
+  let snapshot = engine.getSnapshot(1000);
+  assert.equal(snapshot.score, 2, "the earned total is authoritative immediately");
+  assert.equal(snapshot.displayScore, 0, "the HUD starts with the old digits");
+
+  engine.update(1020);
+  assert.equal(engine.getSnapshot(1020).displayScore, 1);
+  engine.update(1220);
+  assert.equal(engine.getSnapshot(1220).displayScore, 1, "the fade delay holds the old digit");
+  engine.update(1240);
+  snapshot = engine.getSnapshot(1240);
+  assert.equal(snapshot.displayScore, 2);
+  assert.equal(snapshot.score, 2);
 });
 
 test("the cursor moves during the opening countdown while swapping stays locked", () => {

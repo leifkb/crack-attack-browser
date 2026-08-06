@@ -7,8 +7,6 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-import { ORIGINAL_CAMERA_DISTANCE, ORIGINAL_LIGHT_POSITION } from "./worldView";
-
 type Vector3 = [number, number, number];
 
 interface IndexedLitMesh {
@@ -227,16 +225,45 @@ export class BlockWebGLLayer {
   readonly canvas: HTMLCanvasElement;
 
   private readonly gl: WebGLRenderingContext;
-  private readonly program: WebGLProgram;
-  private readonly positionAttribute: number;
-  private readonly normalAttribute: number;
-  private readonly uniforms: Record<string, WebGLUniformLocation>;
-  private readonly meshBuffers = new WeakMap<object, {
+  private readonly projectionCenterX: number;
+  private readonly projectionCenterY: number;
+  private readonly pixelsPerUnit: number;
+  private readonly cameraDistance: number;
+  private readonly lightPosition: Vector3;
+  private program: WebGLProgram | null = null;
+  private positionAttribute = -1;
+  private normalAttribute = -1;
+  private uniforms: Record<string, WebGLUniformLocation> = {};
+  private meshBuffers = new WeakMap<object, {
     buffer: WebGLBuffer;
     vertexCount: number;
   }>();
   private mesh: WebGLLitMesh | null = null;
   private vertexCount = 0;
+  private available = false;
+
+  private readonly handleContextLost = (event: Event): void => {
+    // Calling preventDefault opts in to the browser's context-restoration path.
+    event.preventDefault();
+    this.available = false;
+    this.program = null;
+    this.positionAttribute = -1;
+    this.normalAttribute = -1;
+    this.uniforms = {};
+    this.meshBuffers = new WeakMap();
+    this.mesh = null;
+    this.vertexCount = 0;
+  };
+
+  private readonly handleContextRestored = (): void => {
+    try {
+      this.initializeResources();
+    } catch {
+      // Canvas2D remains a complete fallback if a restored context cannot
+      // recreate its shaders or buffers on a resource-constrained device.
+      this.available = false;
+    }
+  };
 
   constructor(
     width: number,
@@ -244,6 +271,8 @@ export class BlockWebGLLayer {
     projectionCenterX: number,
     projectionCenterY: number,
     pixelsPerUnit: number,
+    cameraDistance: number,
+    lightPosition: Vector3,
   ) {
     this.canvas = document.createElement("canvas");
     this.canvas.width = width;
@@ -255,54 +284,22 @@ export class BlockWebGLLayer {
     });
     if (!gl) throw new Error("WebGL is unavailable.");
     this.gl = gl;
-    this.program = createProgram(gl);
-    this.positionAttribute = gl.getAttribLocation(this.program, "aPosition");
-    this.normalAttribute = gl.getAttribLocation(this.program, "aNormal");
-    if (this.positionAttribute < 0 || this.normalAttribute < 0) {
-      throw new Error("WebGL block attributes are unavailable.");
-    }
-    this.uniforms = Object.fromEntries([
-      "uViewport",
-      "uCenter",
-      "uProjectionCenter",
-      "uRotation",
-      "uSpinAxis",
-      "uSpinAngle",
-      "uScale",
-      "uPixelsPerUnit",
-      "uCameraDistance",
-      "uLightPosition",
-      "uColor",
-      "uMaterialLight",
-      "uAlpha",
-      "uClipEnabled",
-      "uClipMinY",
-      "uDoubleSided",
-    ].map((name) => [name, requiredUniform(gl, this.program, name)]));
-
-    gl.useProgram(this.program);
-    gl.uniform2f(this.uniforms.uViewport, width, height);
-    gl.uniform2f(this.uniforms.uProjectionCenter, projectionCenterX, projectionCenterY);
-    gl.uniform1f(this.uniforms.uPixelsPerUnit, pixelsPerUnit);
-    gl.uniform1f(this.uniforms.uCameraDistance, ORIGINAL_CAMERA_DISTANCE);
-    gl.uniform3f(
-      this.uniforms.uLightPosition,
-      ORIGINAL_LIGHT_POSITION[0],
-      ORIGINAL_LIGHT_POSITION[1],
-      ORIGINAL_LIGHT_POSITION[2],
-    );
-    gl.enableVertexAttribArray(this.positionAttribute);
-    gl.enableVertexAttribArray(this.normalAttribute);
-
-    gl.enable(gl.DEPTH_TEST);
-    gl.depthFunc(gl.LESS);
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    gl.enable(gl.CULL_FACE);
-    gl.cullFace(gl.BACK);
+    this.projectionCenterX = projectionCenterX;
+    this.projectionCenterY = projectionCenterY;
+    this.pixelsPerUnit = pixelsPerUnit;
+    this.cameraDistance = cameraDistance;
+    this.lightPosition = lightPosition;
+    this.initializeResources();
+    this.canvas.addEventListener("webglcontextlost", this.handleContextLost);
+    this.canvas.addEventListener("webglcontextrestored", this.handleContextRestored);
   }
 
-  begin(mesh: WebGLLitMesh): void {
+  isAvailable(): boolean {
+    return this.available && !this.gl.isContextLost();
+  }
+
+  begin(mesh: WebGLLitMesh): boolean {
+    if (!this.isAvailable() || !this.program) return false;
     const { gl } = this;
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.clearColor(0, 0, 0, 0);
@@ -310,9 +307,11 @@ export class BlockWebGLLayer {
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.useProgram(this.program);
     this.useMesh(mesh);
+    return this.isAvailable();
   }
 
   useMesh(mesh: WebGLLitMesh): void {
+    if (!this.isAvailable()) throw new Error("WebGL context is unavailable.");
     if (this.mesh === mesh) return;
     const uploaded = this.meshBuffers.get(mesh as object) ?? this.uploadMesh(mesh);
     const { gl } = this;
@@ -324,6 +323,7 @@ export class BlockWebGLLayer {
   }
 
   draw(block: WebGLBlockDraw): void {
+    if (!this.isAvailable()) throw new Error("WebGL context is unavailable.");
     const { gl, uniforms } = this;
     const spinAxis = block.spinAxis ?? [1, 0, 0];
     gl.uniform2f(uniforms.uCenter, block.centerX, block.centerY);
@@ -342,6 +342,65 @@ export class BlockWebGLLayer {
     gl.depthMask(block.alpha >= 0.99);
     gl.drawArrays(gl.TRIANGLES, 0, this.vertexCount);
     gl.depthMask(true);
+  }
+
+  private initializeResources(): void {
+    const { gl } = this;
+    const program = createProgram(gl);
+    const positionAttribute = gl.getAttribLocation(program, "aPosition");
+    const normalAttribute = gl.getAttribLocation(program, "aNormal");
+    if (positionAttribute < 0 || normalAttribute < 0) {
+      gl.deleteProgram(program);
+      throw new Error("WebGL block attributes are unavailable.");
+    }
+    const uniforms = Object.fromEntries([
+      "uViewport",
+      "uCenter",
+      "uProjectionCenter",
+      "uRotation",
+      "uSpinAxis",
+      "uSpinAngle",
+      "uScale",
+      "uPixelsPerUnit",
+      "uCameraDistance",
+      "uLightPosition",
+      "uColor",
+      "uMaterialLight",
+      "uAlpha",
+      "uClipEnabled",
+      "uClipMinY",
+      "uDoubleSided",
+    ].map((name) => [name, requiredUniform(gl, program, name)]));
+
+    this.program = program;
+    this.positionAttribute = positionAttribute;
+    this.normalAttribute = normalAttribute;
+    this.uniforms = uniforms;
+    this.meshBuffers = new WeakMap();
+    this.mesh = null;
+    this.vertexCount = 0;
+
+    gl.useProgram(program);
+    gl.uniform2f(uniforms.uViewport, this.canvas.width, this.canvas.height);
+    gl.uniform2f(uniforms.uProjectionCenter, this.projectionCenterX, this.projectionCenterY);
+    gl.uniform1f(uniforms.uPixelsPerUnit, this.pixelsPerUnit);
+    gl.uniform1f(uniforms.uCameraDistance, this.cameraDistance);
+    gl.uniform3f(
+      uniforms.uLightPosition,
+      this.lightPosition[0],
+      this.lightPosition[1],
+      this.lightPosition[2],
+    );
+    gl.enableVertexAttribArray(positionAttribute);
+    gl.enableVertexAttribArray(normalAttribute);
+
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LESS);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
+    this.available = true;
   }
 
   private uploadMesh(mesh: WebGLLitMesh): { buffer: WebGLBuffer; vertexCount: number } {
