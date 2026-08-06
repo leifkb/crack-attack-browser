@@ -149,6 +149,17 @@ export function gameOverBounceHeight(elapsedMs: number): number {
   return state.height + (next.height - state.height) * remainder;
 }
 
+export function gameOverCenterY(
+  elapsedMs: number,
+  playfieldTop: number,
+  playfieldHeight: number,
+  pixelsPerWorldUnit: number,
+): number {
+  // DrawMessages.cxx settles the loss message halfway up the safe playfield.
+  const settledCenterY = playfieldTop + playfieldHeight / 2;
+  return settledCenterY - gameOverBounceHeight(elapsedMs) * pixelsPerWorldUnit;
+}
+
 export interface GarbageShatterVisual {
   flash: number;
   clipMinY: number | null;
