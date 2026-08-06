@@ -42,6 +42,7 @@ import {
   type GarbageMesh,
 } from "./renderGeometry";
 import {
+  ORIGINAL_CAMERA_DISTANCE,
   ORIGINAL_LIGHT_POSITION,
   projectWorldPoint,
   screenCenterToWorld,
@@ -239,6 +240,8 @@ function getBlockWebGLLayer(): BlockWebGLLayer | null {
       VIEW_CENTER_X,
       VIEW_CENTER_Y,
       1 / WORLD_UNITS_PER_PIXEL,
+      ORIGINAL_CAMERA_DISTANCE,
+      ORIGINAL_LIGHT_POSITION,
     );
   } catch {
     blockWebGLLayer = null;
@@ -675,7 +678,7 @@ function drawHud(
 ): void {
   drawLoseBar(context, snapshot.dangerMs);
   const hudCenterX = 182;
-  const score = formatSoloScore(snapshot.score);
+  const score = formatSoloScore(snapshot.displayScore);
   const scoreSize = 44;
   drawSparkle(
     context,
@@ -1191,8 +1194,25 @@ function drawWebGLBlocks(
 ): boolean {
   if (!assets.blockMesh) return false;
   const layer = getBlockWebGLLayer();
-  if (!layer) return false;
-  layer.begin(assets.blockMesh);
+  if (!layer || !layer.isAvailable()) return false;
+  try {
+    return renderWebGLBlocks(context, snapshot, assets, now, garbageGroups, layer);
+  } catch {
+    // Context loss can happen between any two WebGL calls. The Canvas2D path
+    // below draws the complete frame until the layer reports a healthy restore.
+    return false;
+  }
+}
+
+function renderWebGLBlocks(
+  context: CanvasRenderingContext2D,
+  snapshot: GameSnapshot,
+  assets: RenderAssets,
+  now: number,
+  garbageGroups: GarbageGroupRender[],
+  layer: BlockWebGLLayer,
+): boolean {
+  if (!assets.blockMesh || !layer.begin(assets.blockMesh)) return false;
 
   snapshot.nextRow.forEach((cell, x) => {
     if (!cell || cell.kind !== "block") return;
@@ -1303,6 +1323,7 @@ function drawWebGLBlocks(
     });
   }
 
+  if (!layer.isAvailable()) return false;
   context.drawImage(layer.canvas, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
   return true;
 }

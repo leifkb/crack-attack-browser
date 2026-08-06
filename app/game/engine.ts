@@ -200,6 +200,7 @@ export interface GameSnapshot {
   status: GameStatus;
   phase: Phase;
   score: number;
+  displayScore: number;
   elapsedMs: number;
   rise: number;
   impactOffsetRows: number;
@@ -390,6 +391,17 @@ export function baseScoreFor(magnitude: number, gray = false): number {
   return gray ? normalValue * 3 : normalValue;
 }
 
+export function creepRowsPerSecond(elapsedMs: number, manualRaise: boolean): number {
+  const timerStep = Math.min(2400, 20 + 20 * Math.floor(elapsedMs / 10000));
+  if (manualRaise) {
+    // Creep::timeStep advances three sub-cells at a time while Raise is held.
+    // Once ordinary creep overtakes the initial 1200-step floor, the manual
+    // speed continues increasing at three times the normal rate.
+    return Math.max(1200, timerStep) / 480;
+  }
+  return timerStep / 1440;
+}
+
 export function magnitudeAttacks(
   magnitude: number,
   createdAt: number,
@@ -435,6 +447,9 @@ export class CrackAttackEngine {
   private countdownUntil = 0;
   private gameOverAt = 0;
   private score = 0;
+  private displayScore = 0;
+  private scoreBacklog = 0;
+  private scoreFadeTicks = 0;
   private elapsedMs = 0;
   private rise = 0;
   private impactSpringY = 0;
@@ -445,6 +460,9 @@ export class CrackAttackEngine {
   private cursorFromX = 2;
   private cursorFromY = 4;
   private cursorMoveStarted: number | null = null;
+  private cursorCommandLockedUntil = 0;
+  private queuedCursorMove: Coordinate | null = null;
+  private queuedCursorSwap = false;
   private chainDepth = 0;
   private chainBaseScore = 0;
   private resolvingChain = false;
@@ -496,6 +514,9 @@ export class CrackAttackEngine {
     this.countdownUntil = 0;
     this.gameOverAt = 0;
     this.score = 0;
+    this.displayScore = 0;
+    this.scoreBacklog = 0;
+    this.scoreFadeTicks = 0;
     this.elapsedMs = 0;
     this.rise = 0;
     this.impactSpringY = 0;
@@ -506,6 +527,9 @@ export class CrackAttackEngine {
     this.cursorFromX = 2;
     this.cursorFromY = 4;
     this.cursorMoveStarted = null;
+    this.cursorCommandLockedUntil = 0;
+    this.queuedCursorMove = null;
+    this.queuedCursorSwap = false;
     this.chainDepth = 0;
     this.chainBaseScore = 0;
     this.resolvingChain = false;
@@ -539,6 +563,11 @@ export class CrackAttackEngine {
     if (this.status === "gameover") {
       if (now - this.gameOverAt < GAME_OVER_RESTART_DELAY_MS) return false;
       this.reset(resetSeed);
+    } else if (resetSeed !== undefined) {
+      // The ready screen already owns an initial board so deterministic engine
+      // tests can inspect it. A real run may still provide a fresh wall-clock
+      // seed, matching the desktop game's time-seeded first game.
+      this.reset(resetSeed);
     }
     this.status = "countdown";
     this.countdownUntil = now + COUNTDOWN_START_DELAY_MS;
@@ -554,6 +583,9 @@ export class CrackAttackEngine {
     this.lastUpdate = now;
 
     if (this.status === "countdown") {
+      // Swapper keeps receiving movement input during the opening countdown,
+      // even though the board simulation has not started yet.
+      this.processQueuedCursorCommand(now);
       if (now < this.countdownUntil) return;
 
       this.status = "playing";
@@ -585,6 +617,7 @@ export class CrackAttackEngine {
   private updatePlaying(now: number, delta: number): void {
     this.elapsedMs += delta;
     this.pruneEffects(now);
+    this.processQueuedCursorCommand(now);
 
     // Swaps, falls, clears, and garbage drops all have independent clocks in
     // the original. Advance each due clock so a newly made line never waits
@@ -598,6 +631,7 @@ export class CrackAttackEngine {
     this.releaseDueAwakening(now);
     this.refreshPhase(now);
     if (this.status !== "playing") {
+      this.stepDisplayedScore();
       this.stepImpactSpring();
       return;
     }
@@ -632,10 +666,8 @@ export class CrackAttackEngine {
     // blocks are dying/awakening. Swaps, ordinary falls, and garbage drops all
     // continue alongside the upward pressure.
     if (!inDanger && !eliminationActive) {
-      const normalStep = Math.min(2400, 20 + 20 * Math.floor(this.elapsedMs / 10000));
-      const normalRowsPerSecond = normalStep / 1440;
       const manualRaiseActive = this.raiseHeld || this.raiseToRowBoundary;
-      const rowsPerSecond = manualRaiseActive ? 2.5 : normalRowsPerSecond;
+      const rowsPerSecond = creepRowsPerSecond(this.elapsedMs, manualRaiseActive);
       const riseDelta = rowsPerSecond * (delta / 1000);
 
       // Releasing Raise commits the already-started movement through the next
@@ -676,6 +708,8 @@ export class CrackAttackEngine {
       }
     }
 
+    this.stepDisplayedScore();
+
     // Game::timeStep advances Spring after grid motion, Creep, and queued
     // garbage processing. Keep that exact final position in the 20 ms tick.
     this.stepImpactSpring();
@@ -683,16 +717,38 @@ export class CrackAttackEngine {
 
   moveCursor(dx: number, dy: number, now = this.lastUpdate ?? 0): void {
     if (this.status !== "playing" && this.status !== "countdown") return;
-    this.moveCursorTo(this.cursorX + dx, this.cursorY + dy, now);
+    this.processQueuedCursorCommand(now);
+    if (this.cursorInputLocked(now)) {
+      if (!this.queuedCursorSwap) this.queuedCursorMove = { x: dx, y: dy };
+      return;
+    }
+    this.performCursorMove(dx, dy, now);
   }
 
   setCursor(x: number, y: number, now = this.lastUpdate ?? 0): void {
     if (this.status !== "playing" && this.status !== "countdown") return;
+    // Direct board selection is a browser-native affordance rather than an
+    // original controller command. It intentionally replaces queued d-pad
+    // input and remains immediately swappable for taps and horizontal swipes.
+    this.queuedCursorMove = null;
+    this.queuedCursorSwap = false;
+    this.cursorCommandLockedUntil = 0;
     this.moveCursorTo(x, y, now);
   }
 
   swap(now: number): boolean {
     if (this.status !== "playing") return false;
+    this.processQueuedCursorCommand(now);
+    if (now < this.cursorCommandLockedUntil) {
+      this.queuedCursorMove = null;
+      this.queuedCursorSwap = true;
+      return true;
+    }
+    if (this.swapInputLocked(now)) return false;
+    return this.performSwap(now);
+  }
+
+  private performSwap(now: number): boolean {
     // Input can arrive between animation frames. Resolve an elapsed
     // background swap before deciding whether the next one is legal.
     this.finishBackgroundSwap(now);
@@ -835,6 +891,7 @@ export class CrackAttackEngine {
       status: this.status,
       phase: this.phase,
       score: this.score,
+      displayScore: this.displayScore,
       elapsedMs: this.elapsedMs,
       rise: this.rise,
       impactOffsetRows: this.impactSpringY / WORLD_UNITS_PER_ROW,
@@ -1092,6 +1149,7 @@ export class CrackAttackEngine {
     const gain = base * combo.multiplier + priorBase * multiplierIncrements;
     combo.baseAccumulatedScore += base;
     this.score += gain;
+    this.scoreBacklog += gain;
     this.lastGain = gain;
 
     const totalMagnitude = normalMagnitude + grayMagnitude;
@@ -1410,6 +1468,7 @@ export class CrackAttackEngine {
     if (this.countdownUntil > 0) this.countdownUntil += duration;
     if (this.messageUntil > 0) this.messageUntil += duration;
     if (this.cursorMoveStarted !== null) this.cursorMoveStarted += duration;
+    if (this.cursorCommandLockedUntil > 0) this.cursorCommandLockedUntil += duration;
     for (const attack of this.queuedAttacks) attack.dropAt += duration;
     for (const sign of this.rewardSigns) {
       sign.startedAt += duration;
@@ -2152,6 +2211,55 @@ export class CrackAttackEngine {
     };
   }
 
+  private cursorInputLocked(now: number): boolean {
+    return now < this.cursorCommandLockedUntil || this.swapInputLocked(now);
+  }
+
+  private swapInputLocked(now: number): boolean {
+    return (
+      (this.phase === "swapping" && now < this.phaseUntil)
+      || now < this.backgroundSwapUntil
+    );
+  }
+
+  private performCursorMove(dx: number, dy: number, now: number): boolean {
+    const beforeX = this.cursorX;
+    const beforeY = this.cursorY;
+    this.moveCursorTo(this.cursorX + dx, this.cursorY + dy, now);
+    if (beforeX === this.cursorX && beforeY === this.cursorY) return false;
+    this.cursorCommandLockedUntil = now + CURSOR_MOVE_DURATION_MS;
+    return true;
+  }
+
+  private processQueuedCursorCommand(now: number): void {
+    if (this.status !== "playing" && this.status !== "countdown") return;
+    if (this.cursorInputLocked(now)) return;
+
+    if (this.queuedCursorSwap) {
+      this.queuedCursorSwap = false;
+      this.queuedCursorMove = null;
+      if (this.status === "playing") this.performSwap(now);
+      return;
+    }
+
+    const move = this.queuedCursorMove;
+    if (!move) return;
+    this.queuedCursorMove = null;
+    this.performCursorMove(move.x, move.y, now);
+  }
+
+  private stepDisplayedScore(): void {
+    if (this.scoreFadeTicks > 0) {
+      this.scoreFadeTicks -= 1;
+      return;
+    }
+    if (this.scoreBacklog <= 0) return;
+
+    this.scoreBacklog -= 1;
+    this.displayScore += 1;
+    this.scoreFadeTicks = Math.max(1, 12 - 2 * this.scoreBacklog);
+  }
+
   private moveCursorTo(x: number, y: number, now: number): void {
     const targetX = Math.max(0, Math.min(BOARD_COLUMNS - 2, Math.floor(x)));
     const targetY = Math.max(0, Math.min(VISIBLE_ROWS - 1, Math.floor(y)));
@@ -2328,6 +2436,13 @@ export class CrackAttackEngine {
     this.gameOverAt = now;
     this.raiseHeld = false;
     this.raiseToRowBoundary = false;
+    // Score::gameFinish consumes the earned total. Flush any remaining visual
+    // backlog so the result screen and persisted record always use that total.
+    this.displayScore = this.score;
+    this.scoreBacklog = 0;
+    this.scoreFadeTicks = 0;
+    this.queuedCursorMove = null;
+    this.queuedCursorSwap = false;
     this.events.push({ type: "gameover" });
   }
 }

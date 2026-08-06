@@ -10,6 +10,12 @@ import {
   type GameSnapshot,
 } from "./engine";
 import {
+  TOUCH_CAPABILITY_QUERY,
+  gameKeyboardAction,
+  gameOverRestartPrompt,
+  hasTouchControls,
+} from "./inputPolicy";
+import {
   DEFAULT_SCORE_TO_BEAT,
   loadScoreToBeat,
   recordScoreToBeat,
@@ -33,7 +39,6 @@ const ASSET_LOAD_TIMEOUT_MS = 8000;
 const THUMBPAD_STEP_PX = 24;
 const THUMBPAD_PUCK_RANGE_PX = 17;
 const BOARD_SWIPE_THRESHOLD = CELL_SIZE * 0.42;
-const TOUCH_PRIMARY_QUERY = "(hover: none) and (pointer: coarse)";
 
 const IMAGE_SOURCES = {
   logo: gameAssetUrl("logo.png"),
@@ -242,19 +247,27 @@ function paintCanvas(
   drawGame(context, snapshot, assets, highScore, useTouchPrompt);
 }
 
-function statusCopy(snapshot: GameSnapshot): string {
+function statusCopy(
+  snapshot: GameSnapshot,
+  isNewBest: boolean,
+  restartReady: boolean,
+): string {
   if (snapshot.status === "ready") return "Ready for a new solo run";
   if (snapshot.status === "countdown") return `Starting in ${snapshot.countdown ?? "a moment"}`;
   if (snapshot.status === "paused") return "Game paused";
-  if (snapshot.status === "gameover") return `Game over. Score ${snapshot.score}`;
+  if (snapshot.status === "gameover") {
+    return `${isNewBest ? "New best score. " : ""}Game over. Score ${snapshot.score}. ${
+      restartReady ? "Restart available" : "Restart unlocks shortly"
+    }`;
+  }
   if (snapshot.dangerMs > 0) return "Danger: clear the top row before time runs out";
   if (snapshot.awakeningCount > 0) return `${snapshot.awakeningCount} garbage blocks are revealing their colors`;
   if (snapshot.incomingCount > 0) return `${snapshot.incomingCount} garbage attack${snapshot.incomingCount === 1 ? "" : "s"} incoming`;
-  return `Score ${snapshot.score}`;
+  return `Score ${snapshot.displayScore}`;
 }
 
 export default function CrackAttackGame() {
-  const [engine] = useState(() => new CrackAttackEngine({ seed: 0x0caca001 }));
+  const [engine] = useState(() => new CrackAttackEngine());
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const assetsRef = useRef<RenderAssets>({
@@ -274,7 +287,6 @@ export default function CrackAttackGame() {
   const audioRef = useRef<AudioRig | null>(null);
   const assetsReadyRef = useRef(false);
   const useTouchPromptRef = useRef(false);
-  const highScoreRef = useRef(DEFAULT_SCORE_TO_BEAT);
   const lastUiUpdateRef = useRef(0);
   const lastTapRef = useRef<{ x: number; y: number; at: number } | null>(null);
   const canvasGestureRef = useRef<CanvasGesture | null>(null);
@@ -282,10 +294,21 @@ export default function CrackAttackGame() {
   const suppressThumbpadClickRef = useRef(false);
   const raisePointerRef = useRef<number | null>(null);
   const [snapshot, setSnapshot] = useState<GameSnapshot>(() => engine.getSnapshot(0));
-  const lastPublishedRef = useRef({ status: snapshot.status, score: snapshot.score });
+  const lastPublishedRef = useRef({
+    status: snapshot.status,
+    score: snapshot.score,
+    displayScore: snapshot.displayScore,
+  });
+  const [highScore, setHighScore] = useState(() => (
+    typeof window === "undefined"
+      ? DEFAULT_SCORE_TO_BEAT
+      : loadScoreToBeat(browserScoreStorage())
+  ));
+  const highScoreRef = useRef(highScore);
   const [isNewBest, setIsNewBest] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [visualReady, setVisualReady] = useState(false);
+  const [touchControlsAvailable, setTouchControlsAvailable] = useState(false);
   const [thumbpadVisual, setThumbpadVisual] = useState({ active: false, x: 0, y: 0 });
 
   const ensureAudio = useCallback(() => {
@@ -311,13 +334,17 @@ export default function CrackAttackGame() {
   }, [soundEnabled]);
 
   useEffect(() => {
-    highScoreRef.current = loadScoreToBeat(browserScoreStorage());
-    const touchPrimaryMedia = window.matchMedia(TOUCH_PRIMARY_QUERY);
+    const touchCapabilityMedia = window.matchMedia(TOUCH_CAPABILITY_QUERY);
     const syncReadyPrompt = () => {
-      useTouchPromptRef.current = touchPrimaryMedia.matches;
+      const available = hasTouchControls(
+        touchCapabilityMedia.matches,
+        navigator.maxTouchPoints ?? 0,
+      );
+      useTouchPromptRef.current = available;
+      setTouchControlsAvailable(available);
     };
     syncReadyPrompt();
-    touchPrimaryMedia.addEventListener("change", syncReadyPrompt);
+    touchCapabilityMedia.addEventListener("change", syncReadyPrompt);
     let active = true;
     let revealFrame = 0;
     void Promise.all([
@@ -395,7 +422,7 @@ export default function CrackAttackGame() {
     });
     return () => {
       active = false;
-      touchPrimaryMedia.removeEventListener("change", syncReadyPrompt);
+      touchCapabilityMedia.removeEventListener("change", syncReadyPrompt);
       window.cancelAnimationFrame(revealFrame);
     };
   }, [engine]);
@@ -419,6 +446,7 @@ export default function CrackAttackGame() {
         );
         if (nextScoreToBeat > highScoreRef.current) {
           highScoreRef.current = nextScoreToBeat;
+          setHighScore(nextScoreToBeat);
           setIsNewBest(true);
         }
       }
@@ -437,9 +465,14 @@ export default function CrackAttackGame() {
       const lastPublished = lastPublishedRef.current;
       if (now - lastUiUpdateRef.current > 100
         || current.status !== lastPublished.status
-        || current.score !== lastPublished.score) {
+        || current.score !== lastPublished.score
+        || current.displayScore !== lastPublished.displayScore) {
         lastUiUpdateRef.current = now;
-        lastPublishedRef.current = { status: current.status, score: current.score };
+        lastPublishedRef.current = {
+          status: current.status,
+          score: current.score,
+          displayScore: current.displayScore,
+        };
         setSnapshot(current);
       }
       animationFrame = window.requestAnimationFrame(render);
@@ -479,33 +512,34 @@ export default function CrackAttackGame() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!assetsReadyRef.current) return;
-      if (
-        event.target instanceof HTMLInputElement
-        || event.target instanceof HTMLTextAreaElement
-        || event.target instanceof HTMLSelectElement
-        || event.target instanceof HTMLButtonElement
-        || event.target instanceof HTMLAnchorElement
-      ) return;
-      const key = event.key.toLowerCase();
-      const handled = [
-        "arrowleft", "arrowright", "arrowup", "arrowdown",
-        "a", "d", "w", "s", " ", "k", "enter", "l", "p",
-      ].includes(key);
-      if (handled) event.preventDefault();
-
-      const currentStatus = engine.getSnapshot(performance.now()).status;
-      if ((currentStatus === "ready" || currentStatus === "gameover") && (key === " " || key === "enter")) {
-        if (!event.repeat) startRun();
-        return;
-      }
       const now = performance.now();
-      if (key === "arrowleft" || key === "a") engine.moveCursor(-1, 0, now);
-      else if (key === "arrowright" || key === "d") engine.moveCursor(1, 0, now);
-      else if (key === "arrowup" || key === "w") engine.moveCursor(0, 1, now);
-      else if (key === "arrowdown" || key === "s") engine.moveCursor(0, -1, now);
-      else if ((key === " " || key === "k") && !event.repeat) swap();
-      else if (key === "enter" || key === "l") engine.setRaiseHeld(true);
-      else if (key === "p" && !event.repeat) pauseRun();
+      const target = event.target;
+      if (
+        target instanceof Element
+        && target.closest("input, textarea, select, button, a, [contenteditable='true']")
+      ) return;
+      const current = engine.getSnapshot(now);
+      const action = gameKeyboardAction({
+        status: current.status,
+        key: event.key,
+        repeat: event.repeat,
+        composing: event.isComposing,
+        altKey: event.altKey,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        restartReady: current.gameOverElapsedMs >= GAME_OVER_RESTART_DELAY_MS,
+      });
+      if (!action) return;
+      event.preventDefault();
+
+      if (action === "start" || action === "restart") startRun();
+      else if (action === "move-left") engine.moveCursor(-1, 0, now);
+      else if (action === "move-right") engine.moveCursor(1, 0, now);
+      else if (action === "move-up") engine.moveCursor(0, 1, now);
+      else if (action === "move-down") engine.moveCursor(0, -1, now);
+      else if (action === "swap") swap();
+      else if (action === "raise") engine.setRaiseHeld(true);
+      else if (action === "pause") pauseRun();
     };
     const onKeyUp = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
@@ -529,6 +563,37 @@ export default function CrackAttackGame() {
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [engine]);
+
+  useEffect(() => {
+    const cancelPointer = (event: PointerEvent) => {
+      if (raisePointerRef.current === event.pointerId) {
+        raisePointerRef.current = null;
+        engine.setRaiseHeld(false);
+      }
+      if (thumbpadGestureRef.current?.pointerId === event.pointerId) {
+        thumbpadGestureRef.current = null;
+        setThumbpadVisual({ active: false, x: 0, y: 0 });
+      }
+      if (canvasGestureRef.current?.pointerId === event.pointerId) {
+        canvasGestureRef.current = null;
+      }
+    };
+    const cancelAllPointers = () => {
+      raisePointerRef.current = null;
+      thumbpadGestureRef.current = null;
+      canvasGestureRef.current = null;
+      engine.setRaiseHeld(false);
+      setThumbpadVisual({ active: false, x: 0, y: 0 });
+    };
+    window.addEventListener("pointerup", cancelPointer);
+    window.addEventListener("pointercancel", cancelPointer);
+    window.addEventListener("blur", cancelAllPointers);
+    return () => {
+      window.removeEventListener("pointerup", cancelPointer);
+      window.removeEventListener("pointercancel", cancelPointer);
+      window.removeEventListener("blur", cancelAllPointers);
+    };
   }, [engine]);
 
   const handleCanvasPointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -807,9 +872,24 @@ export default function CrackAttackGame() {
     if (event.detail === 0) attemptSwap();
   };
 
+  const toggleSound = (event: React.MouseEvent<HTMLButtonElement>) => {
+    setSoundEnabled((enabled) => !enabled);
+    // Pointer users expect game keys to work immediately after toggling sound.
+    // Keyboard/assistive activation keeps native button focus for accessibility.
+    if (event.detail > 0) {
+      window.requestAnimationFrame(() => canvasRef.current?.focus());
+    }
+  };
+
+  const restartPrompt = gameOverRestartPrompt(
+    snapshot.gameOverElapsedMs,
+    GAME_OVER_RESTART_DELAY_MS,
+  );
+
   return (
     <section
       className="game-experience"
+      data-touch-controls={touchControlsAvailable}
       aria-labelledby="game-title"
       aria-busy={!visualReady}
       style={{ visibility: visualReady ? "visible" : "hidden" }}
@@ -822,7 +902,7 @@ export default function CrackAttackGame() {
           <span className="port-status"><i aria-hidden="true" /> Original-style single player</span>
         </div>
         <div className="port-actions">
-          <button type="button" onClick={() => setSoundEnabled((enabled) => !enabled)}>
+          <button type="button" onClick={toggleSound}>
             {soundEnabled ? "Sound on" : "Sound off"}
           </button>
           <button type="button" onClick={pauseRun} disabled={snapshot.status === "ready" || snapshot.status === "gameover"}>
@@ -831,139 +911,151 @@ export default function CrackAttackGame() {
         </div>
       </div>
 
-      <div className="game-frame">
-        <canvas
-          ref={canvasRef}
-          className="game-canvas"
-          onPointerDown={handleCanvasPointerDown}
-          onPointerMove={handleCanvasPointerMove}
-          onPointerUp={handleCanvasPointerUp}
-          onPointerCancel={handleCanvasPointerCancel}
-          onLostPointerCapture={handleCanvasPointerCancel}
-          tabIndex={0}
-          role="img"
-          aria-label="A six-column Crack Attack puzzle board with a movable two-block cursor."
-        />
+      <div className="game-play-area">
+        <div className="game-frame">
+          <canvas
+            ref={canvasRef}
+            className="game-canvas"
+            onPointerDown={handleCanvasPointerDown}
+            onPointerMove={handleCanvasPointerMove}
+            onPointerUp={handleCanvasPointerUp}
+            onPointerCancel={handleCanvasPointerCancel}
+            onLostPointerCapture={handleCanvasPointerCancel}
+            tabIndex={0}
+            role="img"
+            aria-label="A six-column Crack Attack puzzle board with a movable two-block cursor."
+          />
 
-        {snapshot.status === "ready" && (
-          <div className="game-overlay">
-            <button type="button" className="original-screen-action" onClick={startRun}>
-              <span className="sr-only">Start single-player game</span>
-            </button>
-          </div>
-        )}
+          {snapshot.status === "ready" && (
+            <div className="game-overlay">
+              <button type="button" className="original-screen-action" onClick={startRun}>
+                <span className="sr-only">Start single-player game</span>
+              </button>
+            </div>
+          )}
 
-        {snapshot.status === "paused" && (
-          <div className="game-overlay">
-            <button type="button" className="original-screen-action" onClick={pauseRun}>
-              <span className="sr-only">Resume game</span>
-            </button>
-          </div>
-        )}
+          {snapshot.status === "paused" && (
+            <div className="game-overlay">
+              <button type="button" className="original-screen-action" onClick={pauseRun}>
+                <span className="sr-only">Resume game</span>
+              </button>
+            </div>
+          )}
 
-        {snapshot.status === "gameover" && (
-          <div className="game-overlay">
+          {snapshot.status === "gameover" && (
+            <div className="game-overlay">
+              <button
+                type="button"
+                className="original-screen-action"
+                onClick={startRun}
+                disabled={!restartPrompt.ready}
+              >
+                <span className="game-over-summary">
+                  {isNewBest && <strong>New best</strong>}
+                  <span>
+                    Final score <b>{snapshot.score.toLocaleString()}</b>
+                    <i aria-hidden="true" />
+                    Best <b>{highScore.toLocaleString()}</b>
+                  </span>
+                  <small>{restartPrompt.text}</small>
+                </span>
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="game-controls">
+          <p className="keyboard-hint">
+            <strong>Keyboard controls</strong>
+            <span><kbd>Arrow keys</kbd> move</span>
+            <span><kbd>Space</kbd> swap</span>
+            <span><kbd>Enter</kbd> raise</span>
+            <span><kbd>P</kbd> pause</span>
+          </p>
+
+          <p className="touch-hint" id="touch-control-hint">
+            <strong>Touch:</strong> swipe blocks sideways, or glide anywhere on the move pad.
+          </p>
+          <div
+            className="touch-console"
+            role="group"
+            aria-label="On-screen game controls"
+            aria-describedby="touch-control-hint"
+          >
+            <div
+              className={`gesture-pad${thumbpadVisual.active ? " is-active" : ""}`}
+              onPointerDown={handleThumbpadPointerDown}
+              onPointerMove={handleThumbpadPointerMove}
+              onPointerUp={finishThumbpadGesture}
+              onPointerCancel={cancelThumbpadGesture}
+              onLostPointerCapture={cancelThumbpadGesture}
+            >
+              <span
+                className="gesture-pad-puck"
+                aria-hidden="true"
+                style={{
+                  transform: `translate3d(${thumbpadVisual.x}px, ${thumbpadVisual.y}px, 0)`,
+                }}
+              />
+              <span className="gesture-pad-name" aria-hidden="true">Glide</span>
+              <button
+                type="button"
+                className="pad-zone pad-up"
+                data-pad-dx="0"
+                data-pad-dy="1"
+                aria-label="Move cursor up"
+                onClick={() => tapMove(0, 1)}
+              ><span aria-hidden="true">▲</span></button>
+              <button
+                type="button"
+                className="pad-zone pad-right"
+                data-pad-dx="1"
+                data-pad-dy="0"
+                aria-label="Move cursor right"
+                onClick={() => tapMove(1, 0)}
+              ><span aria-hidden="true">▶</span></button>
+              <button
+                type="button"
+                className="pad-zone pad-down"
+                data-pad-dx="0"
+                data-pad-dy="-1"
+                aria-label="Move cursor down"
+                onClick={() => tapMove(0, -1)}
+              ><span aria-hidden="true">▼</span></button>
+              <button
+                type="button"
+                className="pad-zone pad-left"
+                data-pad-dx="-1"
+                data-pad-dy="0"
+                aria-label="Move cursor left"
+                onClick={() => tapMove(-1, 0)}
+              ><span aria-hidden="true">◀</span></button>
+            </div>
             <button
               type="button"
-              className="original-screen-action"
-              onClick={startRun}
-              disabled={snapshot.gameOverElapsedMs < GAME_OVER_RESTART_DELAY_MS}
+              className="console-button swap-button"
+              onPointerDown={pressSwap}
+              onClick={clickSwap}
             >
-              <span className="sr-only">
-                {isNewBest ? "New best score. " : ""}Start a new game after scoring {snapshot.score}
-              </span>
+              <span>Swap</span>
+            </button>
+            <button
+              type="button"
+              className="console-button raise-button"
+              onPointerDown={pressRaise}
+              onPointerUp={releaseRaise}
+              onPointerCancel={releaseRaise}
+              onLostPointerCapture={releaseRaise}
+            >
+              <span>Raise</span>
             </button>
           </div>
-        )}
-      </div>
-
-      <p className="keyboard-hint">
-        <strong>Keyboard controls</strong>
-        <span><kbd>Arrow keys</kbd> move</span>
-        <span><kbd>Space</kbd> swap</span>
-        <span><kbd>Enter</kbd> raise</span>
-        <span><kbd>P</kbd> pause</span>
-      </p>
-
-      <p className="touch-hint" id="touch-control-hint">
-        <strong>Touch:</strong> swipe blocks sideways, or glide anywhere on the move pad.
-      </p>
-      <div
-        className="touch-console"
-        role="group"
-        aria-label="On-screen game controls"
-        aria-describedby="touch-control-hint"
-      >
-        <div
-          className={`gesture-pad${thumbpadVisual.active ? " is-active" : ""}`}
-          onPointerDown={handleThumbpadPointerDown}
-          onPointerMove={handleThumbpadPointerMove}
-          onPointerUp={finishThumbpadGesture}
-          onPointerCancel={cancelThumbpadGesture}
-          onLostPointerCapture={cancelThumbpadGesture}
-        >
-          <span
-            className="gesture-pad-puck"
-            aria-hidden="true"
-            style={{
-              transform: `translate3d(${thumbpadVisual.x}px, ${thumbpadVisual.y}px, 0)`,
-            }}
-          />
-          <span className="gesture-pad-name" aria-hidden="true">Glide</span>
-          <button
-            type="button"
-            className="pad-zone pad-up"
-            data-pad-dx="0"
-            data-pad-dy="1"
-            aria-label="Move cursor up"
-            onClick={() => tapMove(0, 1)}
-          ><span aria-hidden="true">▲</span></button>
-          <button
-            type="button"
-            className="pad-zone pad-right"
-            data-pad-dx="1"
-            data-pad-dy="0"
-            aria-label="Move cursor right"
-            onClick={() => tapMove(1, 0)}
-          ><span aria-hidden="true">▶</span></button>
-          <button
-            type="button"
-            className="pad-zone pad-down"
-            data-pad-dx="0"
-            data-pad-dy="-1"
-            aria-label="Move cursor down"
-            onClick={() => tapMove(0, -1)}
-          ><span aria-hidden="true">▼</span></button>
-          <button
-            type="button"
-            className="pad-zone pad-left"
-            data-pad-dx="-1"
-            data-pad-dy="0"
-            aria-label="Move cursor left"
-            onClick={() => tapMove(-1, 0)}
-          ><span aria-hidden="true">◀</span></button>
         </div>
-        <button
-          type="button"
-          className="console-button swap-button"
-          onPointerDown={pressSwap}
-          onClick={clickSwap}
-        >
-          <span>Swap</span>
-        </button>
-        <button
-          type="button"
-          className="console-button raise-button"
-          onPointerDown={pressRaise}
-          onPointerUp={releaseRaise}
-          onPointerCancel={releaseRaise}
-          onLostPointerCapture={releaseRaise}
-        >
-          <span>Raise</span>
-        </button>
       </div>
 
-      <p className="sr-only" aria-live="polite">{statusCopy(snapshot)}</p>
+      <p className="sr-only" aria-live="polite">
+        {statusCopy(snapshot, isNewBest, restartPrompt.ready)}
+      </p>
     </section>
   );
 }

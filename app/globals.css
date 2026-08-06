@@ -67,6 +67,11 @@ canvas:focus-visible {
   margin: 0 auto;
 }
 
+.game-play-area,
+.game-controls {
+  min-width: 0;
+}
+
 .port-bar {
   display: flex;
   align-items: center;
@@ -163,6 +168,7 @@ canvas:focus-visible {
 }
 
 .original-screen-action {
+  position: relative;
   display: block;
   width: 100%;
   height: 100%;
@@ -170,6 +176,68 @@ canvas:focus-visible {
   border: 0;
   background: transparent;
   cursor: pointer;
+}
+
+.original-screen-action:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.game-over-summary {
+  position: absolute;
+  bottom: 6%;
+  left: 50%;
+  display: flex;
+  width: max-content;
+  max-width: calc(100% - 28px);
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 10px 15px 9px;
+  border: 1px solid rgba(151, 159, 216, 0.32);
+  border-radius: 10px;
+  background: rgba(5, 7, 16, 0.88);
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.48);
+  color: #cbd1ed;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: clamp(10px, 1.55vw, 13px);
+  font-style: normal;
+  font-weight: 750;
+  letter-spacing: 0.025em;
+  line-height: 1.35;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.game-over-summary strong {
+  color: #fff1a6;
+  font-size: 0.82em;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.game-over-summary span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.game-over-summary b {
+  color: #ffffff;
+  font-size: 1.08em;
+}
+
+.game-over-summary i {
+  width: 1px;
+  height: 1em;
+  margin: 0 2px;
+  background: rgba(166, 174, 223, 0.3);
+}
+
+.game-over-summary small {
+  color: #8f99c4;
+  font-size: 0.78em;
+  font-weight: 700;
 }
 
 .keyboard-hint {
@@ -418,7 +486,7 @@ canvas:focus-visible {
   color: #ffc0c4;
 }
 
-@media (hover: none) and (pointer: coarse) {
+@media (any-pointer: coarse) {
   .keyboard-hint {
     display: none;
   }
@@ -430,6 +498,18 @@ canvas:focus-visible {
   .touch-console {
     display: flex;
   }
+}
+
+.game-experience[data-touch-controls="true"] .keyboard-hint {
+  display: none;
+}
+
+.game-experience[data-touch-controls="true"] .touch-hint {
+  display: block;
+}
+
+.game-experience[data-touch-controls="true"] .touch-console {
+  display: flex;
 }
 
 .player-guide {
@@ -629,9 +709,105 @@ canvas:focus-visible {
   }
 }
 
-@media (max-width: 560px) and (hover: none) and (pointer: coarse) {
+@media (max-width: 560px) and (any-pointer: coarse) {
   .touch-console {
     display: grid;
+  }
+}
+
+@media (max-width: 560px) {
+  .game-experience[data-touch-controls="true"] .touch-console {
+    display: grid;
+  }
+}
+
+@media (orientation: landscape) and (max-height: 600px) and (any-pointer: coarse) {
+  .port-page {
+    min-height: 100dvh;
+    padding:
+      max(6px, env(safe-area-inset-top))
+      max(8px, env(safe-area-inset-right))
+      max(8px, env(safe-area-inset-bottom))
+      max(8px, env(safe-area-inset-left));
+  }
+
+  .game-experience {
+    --landscape-board-size: min(
+      calc(100dvh - 58px - env(safe-area-inset-top) - env(safe-area-inset-bottom)),
+      calc(100vw - 276px - env(safe-area-inset-left) - env(safe-area-inset-right))
+    );
+    width: min(1040px, 100%);
+  }
+
+  .port-bar {
+    min-height: 34px;
+    margin: 0 2px 6px;
+    font-size: 9px;
+  }
+
+  .port-kicker {
+    display: none;
+  }
+
+  .port-actions button {
+    min-height: 30px;
+    padding: 0 9px;
+    font-size: 9px;
+  }
+
+  .game-play-area {
+    display: grid;
+    grid-template-columns: var(--landscape-board-size) minmax(240px, 1fr);
+    align-items: center;
+    gap: 10px;
+  }
+
+  .game-frame {
+    width: var(--landscape-board-size);
+    border: 1px solid rgba(91, 85, 175, 0.24);
+  }
+
+  .game-controls {
+    width: min(560px, 100%);
+    align-self: center;
+    justify-self: center;
+  }
+
+  .touch-hint {
+    max-width: none;
+    margin: 0 0 6px;
+    font-size: 8px;
+    line-height: 1.35;
+  }
+
+  .touch-console,
+  .game-experience[data-touch-controls="true"] .touch-console {
+    display: grid;
+    grid-template-columns: minmax(120px, 1.35fr) repeat(2, minmax(64px, 0.75fr));
+    justify-content: stretch;
+    gap: 6px;
+    margin: 0;
+  }
+
+  .gesture-pad,
+  .console-button {
+    width: 100%;
+    min-width: 0;
+    min-height: min(94px, 26dvh);
+  }
+
+  .gesture-pad {
+    flex: none;
+    border-radius: 18px;
+  }
+
+  .console-button {
+    border-radius: 10px;
+    font-size: 10px;
+  }
+
+  .player-guide {
+    margin-top: 42px;
   }
 }
 
