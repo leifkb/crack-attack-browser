@@ -17,6 +17,7 @@ import {
   GARBAGE_QUEUE_CAPACITY,
   LEVEL_LIGHT_FADE_MS,
   REWARD_MOTE_HOLD_MS,
+  REWARD_MOTE_LIGHT_PALETTE,
   REWARD_MOTE_SIBLING_DELAY_MS,
   SWAP_DURATION_MS,
   VISIBLE_ROWS,
@@ -361,21 +362,43 @@ test("garbage stars use the original reward-level colors, shapes, sizes, and mas
     originalLevel: 3,
     style: "special",
     colorIndex: 4,
+    lightColorIndex: 0,
     size: 3.4,
     inverseMass: 1,
   });
   assert.deepEqual(
+    Array.from({ length: 11 }, (_, level) => (
+      rewardMoteDefinition("magnitude", level).lightColorIndex
+    )),
+    [0, 0, 0, 0, 1, 0, 2, 3, 4, 5, 6],
+  );
+  assert.deepEqual(REWARD_MOTE_LIGHT_PALETTE, [
+    [1, 1, 1],
+    [-1, -1, -1],
+    [0.8, 0, 0.8],
+    [0, 0, 1],
+    [0, 1, 0],
+    [0.8, 0.8, 0],
+    [1, 0.7, 0],
+  ]);
+  assert.deepEqual(
     [2, 3, 4, 5, 6, 7].map((depth) => {
       const mote = rewardMoteDefinition("multiplier", depth);
-      return [mote.originalLevel, mote.style, mote.colorIndex, mote.inverseMass];
+      return [
+        mote.originalLevel,
+        mote.style,
+        mote.colorIndex,
+        mote.lightColorIndex,
+        mote.inverseMass,
+      ];
     }),
     [
-      [11, "multiplier-one", 0, 1],
-      [12, "multiplier-two", 0, 1],
-      [13, "multiplier-three", 0, 1],
-      [14, "multiplier-three", 1, 1 / 1.4],
-      [15, "multiplier-three", 2, 1 / 1.8],
-      [16, "multiplier-three", 3, 1 / 2.2],
+      [11, "multiplier-one", 0, 0, 1],
+      [12, "multiplier-two", 0, 0, 1],
+      [13, "multiplier-three", 0, 0, 1],
+      [14, "multiplier-three", 1, 0, 1 / 1.4],
+      [15, "multiplier-three", 2, 0, 1 / 1.8],
+      [16, "multiplier-three", 3, 0, 1 / 2.2],
     ],
   );
 });
@@ -403,10 +426,13 @@ test("garbage stars follow the original delayed, downward-first spring zig-zag",
   assert.equal(halfFade.y, mote.y);
   assert.equal(halfFade.alpha, 0.5);
   assert.deepEqual(halfFade.color, [1, 0, 0]);
+  assert.equal(halfFade.lightBrightness, 0.2);
+  assert.deepEqual(halfFade.lightColor, [1, 1, 1]);
 
   const launch = rewardMoteVisualAt(mote, mote.launchAt);
   assert.ok(launch.x < mote.x);
   assert.ok(launch.y < mote.y);
+  assert.equal(launch.lightBrightness, 0.4);
 
   let previousX = mote.x;
   let priorDirection = 0;

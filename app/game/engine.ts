@@ -158,6 +158,7 @@ export interface RewardMote {
   id: number;
   style: SparkleStyle;
   colorIndex: number;
+  lightColorIndex: number;
   x: number;
   y: number;
   velocityX: number;
@@ -181,6 +182,10 @@ export type RewardMoteColor = [number, number, number];
 const REWARD_MOTE_LEVEL_COLORS = [
   0, 0, 0, 4, 5, 6, 7, 8, 9, 10, 11,
   0, 0, 0, 1, 2, 3, 3, 3, 3, 3, 3,
+] as const;
+const REWARD_MOTE_LEVEL_LIGHT_COLORS = [
+  0, 0, 0, 0, 1, 0, 2, 3, 4, 5, 6,
+  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ] as const;
 const REWARD_MOTE_LEVEL_STYLES: readonly SparkleStyle[] = [
   "four", "five", "six", "special", "special", "special", "special",
@@ -215,6 +220,16 @@ export const REWARD_MOTE_PALETTE: readonly RewardMoteColor[] = [
   [1, 0.4, 0],
 ];
 
+export const REWARD_MOTE_LIGHT_PALETTE: readonly RewardMoteColor[] = [
+  [1, 1, 1],
+  [-1, -1, -1],
+  [0.8, 0, 0.8],
+  [0, 0, 1],
+  [0, 1, 0],
+  [0.8, 0.8, 0],
+  [1, 0.7, 0],
+];
+
 export const REWARD_MOTE_HOLD_MS = 90 * SIMULATION_STEP_MS;
 export const REWARD_MOTE_SIBLING_DELAY_MS = 25 * SIMULATION_STEP_MS;
 
@@ -222,6 +237,7 @@ export interface RewardMoteDefinition {
   originalLevel: number;
   style: SparkleStyle;
   colorIndex: number;
+  lightColorIndex: number;
   size: number;
   inverseMass: number;
 }
@@ -233,6 +249,8 @@ export interface RewardMoteVisual {
   rotation: number;
   alpha: number;
   color: RewardMoteColor;
+  lightBrightness: number;
+  lightColor: RewardMoteColor;
 }
 
 interface RewardMoteState {
@@ -258,6 +276,7 @@ export function rewardMoteDefinition(
     originalLevel,
     style: REWARD_MOTE_LEVEL_STYLES[originalLevel],
     colorIndex: REWARD_MOTE_LEVEL_COLORS[originalLevel],
+    lightColorIndex: REWARD_MOTE_LEVEL_LIGHT_COLORS[originalLevel],
     size: REWARD_MOTE_LEVEL_SIZES[originalLevel],
     inverseMass: REWARD_MOTE_LEVEL_INVERSE_MASSES[originalLevel],
   };
@@ -370,13 +389,19 @@ function rewardMoteStateAt(mote: RewardMote, now: number): RewardMoteState {
 
 export function rewardMoteVisualAt(mote: RewardMote, now: number): RewardMoteVisual {
   const state = rewardMoteStateAt(mote, now);
+  const alpha = state.lifeTime >= 0 && state.lifeTime < 90 ? state.lifeTime / 90 : 1;
   return {
     active: state.active,
     x: state.x,
     y: state.y,
     rotation: state.rotation,
-    alpha: state.lifeTime >= 0 && state.lifeTime < 90 ? state.lifeTime / 90 : 1,
+    alpha,
     color: rewardMoteColor(mote, state.lifeTime),
+    lightBrightness: state.active ? 0.4 * alpha : 0,
+    lightColor: [...(
+      REWARD_MOTE_LIGHT_PALETTE[mote.lightColorIndex]
+      ?? REWARD_MOTE_LIGHT_PALETTE[0]
+    )],
   };
 }
 
@@ -2622,6 +2647,7 @@ export class CrackAttackEngine {
       id: this.nextEffectId++,
       style: definition.style,
       colorIndex: definition.colorIndex,
+      lightColorIndex: definition.lightColorIndex,
       x: sourceX,
       y: sourceY,
       velocityX: (anchor.x < BOARD_COLUMNS / 2 ? -1 : 1) * 0.707107 * speed,
