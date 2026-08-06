@@ -9,6 +9,27 @@
 
 type Vector3 = [number, number, number];
 
+export interface WebGLPointLight {
+  position: Vector3;
+  color: Vector3;
+}
+
+export type WebGLLightBounds = [number, number, number, number];
+
+export const ORIGINAL_MOTE_LIGHT_RANGE = 2 + 1.414214;
+const MAX_MOTE_LIGHTS = 7;
+
+export function moteLightCenterFade(
+  position: Vector3,
+  bounds: WebGLLightBounds,
+): number {
+  const nearestX = Math.max(bounds[0], Math.min(bounds[2], position[0]));
+  const nearestY = Math.max(bounds[1], Math.min(bounds[3], position[1]));
+  const distanceSquared = (nearestX - position[0]) ** 2
+    + (nearestY - position[1]) ** 2;
+  return Math.max(0, 1 - distanceSquared / ORIGINAL_MOTE_LIGHT_RANGE ** 2);
+}
+
 interface IndexedLitMesh {
   vertices: Vector3[];
   normals: Vector3[];
@@ -41,6 +62,8 @@ export interface WebGLBlockDraw {
   materialLight?: number;
   clipMinY?: number;
   doubleSided?: boolean;
+  lightBounds?: WebGLLightBounds;
+  attenuateMoteLights?: boolean;
 }
 
 const VERTEX_SHADER = `
@@ -57,6 +80,12 @@ const VERTEX_SHADER = `
   uniform float uPixelsPerUnit;
   uniform float uCameraDistance;
   uniform vec3 uLightPosition;
+  uniform float uMoteLightCount;
+  uniform vec3 uMoteLightPositions[7];
+  uniform vec3 uMoteLightColors[7];
+  uniform vec4 uLightBounds;
+  uniform float uMoteLightRangeSquared;
+  uniform float uMoteLightAttenuation;
   uniform vec3 uColor;
   uniform float uMaterialLight;
 
@@ -143,16 +172,46 @@ const VERTEX_SHADER = `
     float backSpecular = backDiffuse > 0.0
       ? 0.5 * pow(max(dot(-objectNormal, halfDirection), 0.0), 10.0)
       : 0.0;
-    vLitColor = clamp(
-      (uColor * diffuse + vec3(specular)) * uMaterialLight,
-      0.0,
-      1.0
-    );
-    vBackLitColor = clamp(
-      (uColor * backDiffuse + vec3(backSpecular)) * uMaterialLight,
-      0.0,
-      1.0
-    );
+    vec3 frontColor = uColor * diffuse + vec3(specular);
+    vec3 backColor = uColor * backDiffuse + vec3(backSpecular);
+
+    // LightManager.cxx permits seven reward-mote point lights. Blocks use a
+    // hand-calculated center-distance fade; garbage additionally enables the
+    // original fixed-function quadratic attenuation.
+    for (int index = 0; index < 7; index++) {
+      if (float(index) < uMoteLightCount) {
+        vec3 moteVector = uMoteLightPositions[index] - worldPosition;
+        vec3 moteDirection = normalize(moteVector);
+        vec3 moteHalfDirection = normalize(moteDirection + vec3(0.0, 0.0, 1.0));
+        vec2 nearestCenter = clamp(
+          uMoteLightPositions[index].xy,
+          uLightBounds.xy,
+          uLightBounds.zw
+        );
+        vec2 centerDelta = nearestCenter - uMoteLightPositions[index].xy;
+        float centerFade = max(
+          0.0,
+          1.0 - dot(centerDelta, centerDelta) / uMoteLightRangeSquared
+        );
+        float attenuation = 1.0 / (
+          1.0 + uMoteLightAttenuation * dot(moteVector, moteVector)
+        );
+        vec3 energy = uMoteLightColors[index] * centerFade * attenuation;
+        float moteDiffuse = max(dot(objectNormal, moteDirection), 0.0);
+        float moteSpecular = moteDiffuse > 0.0
+          ? 0.5 * pow(max(dot(objectNormal, moteHalfDirection), 0.0), 10.0)
+          : 0.0;
+        float moteBackDiffuse = max(dot(-objectNormal, moteDirection), 0.0);
+        float moteBackSpecular = moteBackDiffuse > 0.0
+          ? 0.5 * pow(max(dot(-objectNormal, moteHalfDirection), 0.0), 10.0)
+          : 0.0;
+        frontColor += (uColor * moteDiffuse + vec3(moteSpecular)) * energy;
+        backColor += (uColor * moteBackDiffuse + vec3(moteBackSpecular)) * energy;
+      }
+    }
+
+    vLitColor = clamp(frontColor * uMaterialLight, 0.0, 1.0);
+    vBackLitColor = clamp(backColor * uMaterialLight, 0.0, 1.0);
   }
 `;
 
@@ -241,6 +300,7 @@ export class BlockWebGLLayer {
   private mesh: WebGLLitMesh | null = null;
   private vertexCount = 0;
   private available = false;
+  private moteLights: WebGLPointLight[] = [];
 
   private readonly handleContextLost = (event: Event): void => {
     // Calling preventDefault opts in to the browser's context-restoration path.
@@ -253,6 +313,7 @@ export class BlockWebGLLayer {
     this.meshBuffers = new WeakMap();
     this.mesh = null;
     this.vertexCount = 0;
+    this.moteLights = [];
   };
 
   private readonly handleContextRestored = (): void => {
@@ -298,7 +359,7 @@ export class BlockWebGLLayer {
     return this.available && !this.gl.isContextLost();
   }
 
-  begin(mesh: WebGLLitMesh): boolean {
+  begin(mesh: WebGLLitMesh, moteLights: WebGLPointLight[] = []): boolean {
     if (!this.isAvailable() || !this.program) return false;
     const { gl } = this;
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
@@ -306,6 +367,7 @@ export class BlockWebGLLayer {
     gl.clearDepth(1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.useProgram(this.program);
+    this.moteLights = moteLights;
     this.useMesh(mesh);
     return this.isAvailable();
   }
@@ -326,6 +388,15 @@ export class BlockWebGLLayer {
     if (!this.isAvailable()) throw new Error("WebGL context is unavailable.");
     const { gl, uniforms } = this;
     const spinAxis = block.spinAxis ?? [1, 0, 0];
+    const worldCenterX = (block.centerX - this.projectionCenterX) / this.pixelsPerUnit;
+    const worldCenterY = (this.projectionCenterY - block.centerY) / this.pixelsPerUnit;
+    const lightBounds = block.lightBounds ?? [
+      worldCenterX,
+      worldCenterY,
+      worldCenterX,
+      worldCenterY,
+    ];
+    this.configureMoteLights(lightBounds);
     gl.uniform2f(uniforms.uCenter, block.centerX, block.centerY);
     gl.uniform3f(uniforms.uRotation, block.rotateX, block.rotateY, block.rotateZ);
     gl.uniform3f(uniforms.uSpinAxis, spinAxis[0], spinAxis[1], spinAxis[2]);
@@ -337,11 +408,34 @@ export class BlockWebGLLayer {
     gl.uniform1f(uniforms.uClipEnabled, block.clipMinY === undefined ? 0 : 1);
     gl.uniform1f(uniforms.uClipMinY, block.clipMinY ?? 0);
     gl.uniform1f(uniforms.uDoubleSided, block.doubleSided ? 1 : 0);
+    gl.uniform4f(
+      uniforms.uLightBounds,
+      lightBounds[0],
+      lightBounds[1],
+      lightBounds[2],
+      lightBounds[3],
+    );
+    gl.uniform1f(uniforms.uMoteLightAttenuation, block.attenuateMoteLights ? 0.1 : 0);
     if (block.doubleSided) gl.disable(gl.CULL_FACE);
     else gl.enable(gl.CULL_FACE);
     gl.depthMask(block.alpha >= 0.99);
     gl.drawArrays(gl.TRIANGLES, 0, this.vertexCount);
     gl.depthMask(true);
+  }
+
+  private configureMoteLights(bounds: WebGLLightBounds): void {
+    const active = this.moteLights
+      .filter((light) => moteLightCenterFade(light.position, bounds) > 0)
+      .slice(0, MAX_MOTE_LIGHTS);
+    const positions = new Float32Array(MAX_MOTE_LIGHTS * 3);
+    const colors = new Float32Array(MAX_MOTE_LIGHTS * 3);
+    active.forEach((light, index) => {
+      positions.set(light.position, index * 3);
+      colors.set(light.color, index * 3);
+    });
+    this.gl.uniform1f(this.uniforms.uMoteLightCount, active.length);
+    this.gl.uniform3fv(this.uniforms["uMoteLightPositions[0]"], positions);
+    this.gl.uniform3fv(this.uniforms["uMoteLightColors[0]"], colors);
   }
 
   private initializeResources(): void {
@@ -364,6 +458,12 @@ export class BlockWebGLLayer {
       "uPixelsPerUnit",
       "uCameraDistance",
       "uLightPosition",
+      "uMoteLightCount",
+      "uMoteLightPositions[0]",
+      "uMoteLightColors[0]",
+      "uLightBounds",
+      "uMoteLightRangeSquared",
+      "uMoteLightAttenuation",
       "uColor",
       "uMaterialLight",
       "uAlpha",
@@ -385,6 +485,10 @@ export class BlockWebGLLayer {
     gl.uniform2f(uniforms.uProjectionCenter, this.projectionCenterX, this.projectionCenterY);
     gl.uniform1f(uniforms.uPixelsPerUnit, this.pixelsPerUnit);
     gl.uniform1f(uniforms.uCameraDistance, this.cameraDistance);
+    gl.uniform1f(
+      uniforms.uMoteLightRangeSquared,
+      ORIGINAL_MOTE_LIGHT_RANGE ** 2,
+    );
     gl.uniform3f(
       uniforms.uLightPosition,
       this.lightPosition[0],

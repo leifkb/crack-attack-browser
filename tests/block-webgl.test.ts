@@ -1,10 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { BlockWebGLLayer, type WebGLLitMesh } from "../app/game/blockWebGL.ts";
+import {
+  BlockWebGLLayer,
+  ORIGINAL_MOTE_LIGHT_RANGE,
+  moteLightCenterFade,
+  type WebGLLitMesh,
+} from "../app/game/blockWebGL.ts";
+
+test("reward-mote lights use the original center-distance falloff", () => {
+  const rangeSquared = ORIGINAL_MOTE_LIGHT_RANGE ** 2;
+  assert.equal(moteLightCenterFade([2, 3, -39.5], [2, 3, 2, 3]), 1);
+  assert.ok(Math.abs(
+    moteLightCenterFade([0, 0, -39.5], [2, 0, 2, 0])
+      - (1 - 4 / rangeSquared),
+  ) < 1e-12);
+  assert.equal(moteLightCenterFade([0, 0, -39.5], [4, 0, 4, 0]), 0);
+  assert.equal(moteLightCenterFade([2, 3, -39.5], [0, 0, 4, 6]), 1);
+});
 
 test("the WebGL block layer falls back on context loss and rebuilds on restore", () => {
   const listeners = new Map<string, EventListener>();
+  const uniforms = new Map<string, number | number[]>();
+  type MockUniformLocation = { name: string };
   let contextLost = false;
   let programCreations = 0;
   const gl = {
@@ -41,11 +59,25 @@ test("the WebGL block layer falls back on context loss and rebuilds on restore",
     getProgramInfoLog: () => null,
     deleteProgram: () => undefined,
     getAttribLocation: (_program: object, name: string) => name === "aPosition" ? 0 : 1,
-    getUniformLocation: () => ({}),
+    getUniformLocation: (_program: object, name: string) => ({ name }),
     useProgram: () => undefined,
-    uniform1f: () => undefined,
+    uniform1f: (location: MockUniformLocation, value: number) => {
+      uniforms.set(location.name, value);
+    },
     uniform2f: () => undefined,
     uniform3f: () => undefined,
+    uniform3fv: (location: MockUniformLocation, values: Float32Array) => {
+      uniforms.set(location.name, Array.from(values));
+    },
+    uniform4f: (
+      location: MockUniformLocation,
+      first: number,
+      second: number,
+      third: number,
+      fourth: number,
+    ) => {
+      uniforms.set(location.name, [first, second, third, fourth]);
+    },
     enableVertexAttribArray: () => undefined,
     enable: () => undefined,
     disable: () => undefined,
@@ -86,7 +118,32 @@ test("the WebGL block layer falls back on context loss and rebuilds on restore",
       }],
     };
     assert.equal(layer.isAvailable(), true);
-    assert.equal(layer.begin(mesh), true);
+    assert.equal(layer.begin(mesh, [{
+      position: [0, 0, -39.5],
+      color: [0.4, 0.4, 0.4],
+    }]), true);
+    layer.draw({
+      centerX: 526,
+      centerY: 534,
+      color: [1, 0, 0],
+      alpha: 1,
+      scale: 1,
+      rotateX: 0,
+      rotateY: 0,
+      rotateZ: 0,
+      spinAngle: 0,
+    });
+    assert.equal(uniforms.get("uMoteLightCount"), 1);
+    assert.deepEqual(
+      (uniforms.get("uMoteLightPositions[0]") as number[]).slice(0, 3),
+      [0, 0, -39.5],
+    );
+    const uploadedColor = (
+      uniforms.get("uMoteLightColors[0]") as number[]
+    ).slice(0, 3);
+    uploadedColor.forEach((channel) => assert.ok(Math.abs(channel - 0.4) < 1e-6));
+    assert.deepEqual(uniforms.get("uLightBounds"), [0, 0, 0, 0]);
+    assert.equal(uniforms.get("uMoteLightAttenuation"), 0);
     assert.equal(programCreations, 1);
 
     let prevented = false;

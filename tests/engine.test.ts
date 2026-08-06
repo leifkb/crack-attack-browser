@@ -16,6 +16,9 @@ import {
   GAME_OVER_RESTART_DELAY_MS,
   GARBAGE_QUEUE_CAPACITY,
   LEVEL_LIGHT_FADE_MS,
+  REWARD_MOTE_HOLD_MS,
+  REWARD_MOTE_LIGHT_PALETTE,
+  REWARD_MOTE_SIBLING_DELAY_MS,
   SWAP_DURATION_MS,
   VISIBLE_ROWS,
   baseScoreFor,
@@ -24,6 +27,8 @@ import {
   findMatchCoordinates,
   findMatches,
   magnitudeAttacks,
+  rewardMoteDefinition,
+  rewardMoteVisualAt,
   type AttackPayload,
   type Board,
   type BlockCell,
@@ -32,6 +37,7 @@ import {
   type GameStatus,
   type GarbageCell,
   type MatchPattern,
+  type RewardMote,
 } from "../app/game/engine.ts";
 
 function block(id: number, flavor: BlockFlavor): BlockCell {
@@ -65,6 +71,7 @@ interface EngineHarness {
   phaseUntil: number;
   rise: number;
   score: number;
+  rewardMotes: RewardMote[];
   queuedAttacks: Array<AttackPayload & { dropAt: number }>;
   startClear(
     matches: Coordinate[],
@@ -75,6 +82,13 @@ interface EngineHarness {
   resolveMatches(now: number, sharedSwapCause?: boolean): void;
   finishClear(now: number): void;
   random(): number;
+  createRewardMote(
+    kind: "magnitude" | "multiplier",
+    anchor: Coordinate,
+    level: number,
+    now: number,
+    sibling: number,
+  ): void;
   dropGarbage(
     attack: AttackPayload & { dropAt: number },
     now: number,
@@ -336,6 +350,115 @@ test("ordinary triples stay silent while larger clears use compact reward signs"
   snapshot = fourEngine.getSnapshot(2500);
   assert.equal(snapshot.incomingCount, 1, "the reward star travels before its garbage drops");
   assert.equal(snapshot.rewardMotes.length, 1);
+});
+
+test("garbage stars use the original reward-level colors, shapes, sizes, and masses", () => {
+  assert.deepEqual(
+    [0, 1, 2].map((level) => rewardMoteDefinition("magnitude", level).colorIndex),
+    [0, 0, 0],
+    "every normal-garbage magnitude star is red",
+  );
+  assert.deepEqual(rewardMoteDefinition("magnitude", 3), {
+    originalLevel: 3,
+    style: "special",
+    colorIndex: 4,
+    lightColorIndex: 0,
+    size: 3.4,
+    inverseMass: 1,
+  });
+  assert.deepEqual(
+    Array.from({ length: 11 }, (_, level) => (
+      rewardMoteDefinition("magnitude", level).lightColorIndex
+    )),
+    [0, 0, 0, 0, 1, 0, 2, 3, 4, 5, 6],
+  );
+  assert.deepEqual(REWARD_MOTE_LIGHT_PALETTE, [
+    [1, 1, 1],
+    [-1, -1, -1],
+    [0.8, 0, 0.8],
+    [0, 0, 1],
+    [0, 1, 0],
+    [0.8, 0.8, 0],
+    [1, 0.7, 0],
+  ]);
+  assert.deepEqual(
+    [2, 3, 4, 5, 6, 7].map((depth) => {
+      const mote = rewardMoteDefinition("multiplier", depth);
+      return [
+        mote.originalLevel,
+        mote.style,
+        mote.colorIndex,
+        mote.lightColorIndex,
+        mote.inverseMass,
+      ];
+    }),
+    [
+      [11, "multiplier-one", 0, 0, 1],
+      [12, "multiplier-two", 0, 0, 1],
+      [13, "multiplier-three", 0, 0, 1],
+      [14, "multiplier-three", 1, 0, 1 / 1.4],
+      [15, "multiplier-three", 2, 0, 1 / 1.8],
+      [16, "multiplier-three", 3, 0, 1 / 2.2],
+    ],
+  );
+});
+
+test("garbage stars follow the original delayed, downward-first spring zig-zag", () => {
+  const engine = new CrackAttackEngine({ seed: 0x51544152 });
+  const internals = harness(engine);
+  const startedAt = 1000;
+  internals.createRewardMote("magnitude", { x: 1, y: 2 }, 0, startedAt, 0);
+  internals.createRewardMote("magnitude", { x: 1, y: 2 }, 0, startedAt, 1);
+  const [mote, sibling] = internals.rewardMotes;
+
+  assert.equal(mote.colorIndex, 0);
+  assert.equal(mote.launchAt, startedAt + REWARD_MOTE_HOLD_MS);
+  assert.equal(sibling.launchAt - mote.launchAt, REWARD_MOTE_SIBLING_DELAY_MS);
+  const xTwentieths = (mote.x - 1) * 20;
+  const yTwentieths = (mote.y - 2) * 20;
+  assert.ok(Math.abs(xTwentieths - Math.round(xTwentieths)) < 1e-9);
+  assert.ok(Math.abs(yTwentieths - Math.round(yTwentieths)) < 1e-9);
+  assert.ok(mote.velocityX < 0, "a left-side star initially travels outward");
+  assert.ok(mote.velocityY < 0, "the star initially travels down before rising");
+
+  const halfFade = rewardMoteVisualAt(mote, startedAt + REWARD_MOTE_HOLD_MS / 2);
+  assert.equal(halfFade.x, mote.x);
+  assert.equal(halfFade.y, mote.y);
+  assert.equal(halfFade.alpha, 0.5);
+  assert.deepEqual(halfFade.color, [1, 0, 0]);
+  assert.equal(halfFade.lightBrightness, 0.2);
+  assert.deepEqual(halfFade.lightColor, [1, 1, 1]);
+
+  const launch = rewardMoteVisualAt(mote, mote.launchAt);
+  assert.ok(launch.x < mote.x);
+  assert.ok(launch.y < mote.y);
+  assert.equal(launch.lightBrightness, 0.4);
+
+  let previousX = mote.x;
+  let priorDirection = 0;
+  let reversals = 0;
+  let minimumX = mote.x;
+  let maximumX = mote.x;
+  for (let now = mote.startedAt + 20; now < mote.until; now += 20) {
+    const visual = rewardMoteVisualAt(mote, now);
+    if (!visual.active) break;
+    const direction = Math.sign(visual.x - previousX);
+    if (direction !== 0 && priorDirection !== 0 && direction !== priorDirection) {
+      reversals += 1;
+    }
+    if (direction !== 0) priorDirection = direction;
+    previousX = visual.x;
+    minimumX = Math.min(minimumX, visual.x);
+    maximumX = Math.max(maximumX, visual.x);
+  }
+  assert.ok(reversals >= 3, "the center spring produces repeated direction changes");
+  assert.ok(maximumX - minimumX > 4, "the zig-zag spans most of the playfield");
+
+  internals.createRewardMote("multiplier", { x: 4, y: 2 }, 5, startedAt, 0);
+  const colored = internals.rewardMotes[2];
+  assert.deepEqual(rewardMoteVisualAt(colored, colored.launchAt).color, [0.998, 0.008, 0]);
+  assert.deepEqual(rewardMoteVisualAt(colored, colored.launchAt + 24 * 20).color, [0.95, 0.2, 0]);
+  assert.deepEqual(rewardMoteVisualAt(colored, colored.launchAt + 49 * 20).color, [0.9, 0.4, 0]);
 });
 
 test("solo scoring preserves the original three-block and gray values", () => {

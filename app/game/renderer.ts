@@ -12,8 +12,10 @@ import {
   DEATH_SPARK_GRAVITY,
   DANGER_HIGH_ALERT_MS,
   DANGER_LOSS_DELAY_MS,
+  REWARD_MOTE_PALETTE,
   REWARD_SIGN_LIFETIME_MS,
   VISIBLE_ROWS,
+  rewardMoteVisualAt,
   type BlockCell,
   type Cell,
   type DeathSpark,
@@ -23,7 +25,12 @@ import {
   type RewardSign,
   type SparkleStyle,
 } from "./engine";
-import { BlockWebGLLayer } from "./blockWebGL";
+import {
+  BlockWebGLLayer,
+  moteLightCenterFade,
+  type WebGLLightBounds,
+  type WebGLPointLight,
+} from "./blockWebGL";
 import { scoreToBeat } from "./highScore";
 import {
   creepRowBlockMaterial,
@@ -101,7 +108,6 @@ const GARBAGE_COLORS: Record<"normal" | "gray", Color3> = {
   gray: [0.4, 0.4, 0.4],
 };
 const HUD_STAR_COLOR: Color3 = [0.4, 0.4, 0.7];
-const REWARD_STAR_COLOR: Color3 = [0.62, 0.64, 1];
 const WHITE_STAR_COLOR: Color3 = [1, 1, 1];
 
 const BLOCK_MESH_SIZE = CELL_SIZE * (42 / 52);
@@ -116,7 +122,7 @@ let frameContext: CanvasRenderingContext2D | null = null;
 let blockWebGLLayer: BlockWebGLLayer | null = null;
 let blockWebGLAttempted = false;
 const sparkleTextureCache = new Map<string, HTMLCanvasElement>();
-const MAX_SPARKLE_TEXTURE_CACHE = 32;
+const MAX_SPARKLE_TEXTURE_CACHE = 96;
 const DEATH_SPARK_SHADOW_THRESHOLD = 72;
 
 function clamp(value: number, min = 0, max = 1): number {
@@ -207,11 +213,18 @@ function cross(left: Vector3, right: Vector3): Vector3 {
   ];
 }
 
-function fixedFunctionVertexTone(
+interface FixedFunctionTone {
+  diffuse: Color3;
+  specular: Color3;
+  level: number;
+}
+
+function pointLightTone(
   normal: Vector3,
   point: Vector3,
-): { light: number; specular: number; level: number } {
-  const lightDirection = normalize(subtract(ORIGINAL_LIGHT_POSITION, point));
+  lightPosition: Vector3,
+): { diffuse: number; specular: number } {
+  const lightDirection = normalize(subtract(lightPosition, point));
   // GL_LIGHT_MODEL_LOCAL_VIEWER is false by default in the original, so the
   // fixed-function pipeline uses an infinite viewer along +Z.
   const halfDirection = normalize([
@@ -226,7 +239,113 @@ function fixedFunctionVertexTone(
     + normal[1] * halfDirection[1]
     + normal[2] * halfDirection[2]);
   const specular = light > 0 ? 0.5 * Math.pow(halfLight, 10) : 0;
-  return { light, specular, level: light + specular };
+  return { diffuse: light, specular };
+}
+
+function fixedFunctionVertexTone(
+  normal: Vector3,
+  point: Vector3,
+  moteLights: WebGLPointLight[] = [],
+  lightBounds: WebGLLightBounds = [point[0], point[1], point[0], point[1]],
+  quadraticAttenuation = 0,
+): FixedFunctionTone {
+  const headlight = pointLightTone(normal, point, ORIGINAL_LIGHT_POSITION);
+  const diffuse: Color3 = [headlight.diffuse, headlight.diffuse, headlight.diffuse];
+  const specular: Color3 = [headlight.specular, headlight.specular, headlight.specular];
+  const activeLights = moteLights
+    .filter((light) => moteLightCenterFade(light.position, lightBounds) > 0)
+    .slice(0, 7);
+
+  for (const light of activeLights) {
+    const centerFade = moteLightCenterFade(light.position, lightBounds);
+    const distanceSquared = (light.position[0] - point[0]) ** 2
+      + (light.position[1] - point[1]) ** 2
+      + (light.position[2] - point[2]) ** 2;
+    const attenuation = 1 / (1 + quadraticAttenuation * distanceSquared);
+    const tone = pointLightTone(normal, point, light.position);
+    for (let channel = 0; channel < 3; channel += 1) {
+      const energy = light.color[channel] * centerFade * attenuation;
+      diffuse[channel] += tone.diffuse * energy;
+      specular[channel] += tone.specular * energy;
+    }
+  }
+
+  return {
+    diffuse,
+    specular,
+    level: (
+      diffuse[0] + specular[0]
+      + diffuse[1] + specular[1]
+      + diffuse[2] + specular[2]
+    ) / 3,
+  };
+}
+
+function fixedFunctionColor(
+  color: Color3,
+  tone: FixedFunctionTone,
+  diffuseFloor = 0,
+): string {
+  const diffuseScale = 1 - diffuseFloor;
+  const channels = color.map((channel, index) => clamp(
+    channel * (diffuseFloor + tone.diffuse[index] * diffuseScale)
+      + tone.specular[index],
+  ));
+  return `rgb(${channels.map((channel) => Math.round(channel * 255)).join(" ")})`;
+}
+
+function averageFixedFunctionTone(tones: FixedFunctionTone[]): FixedFunctionTone {
+  const count = Math.max(1, tones.length);
+  const diffuse: Color3 = [0, 0, 0];
+  const specular: Color3 = [0, 0, 0];
+  let level = 0;
+  for (const tone of tones) {
+    for (let channel = 0; channel < 3; channel += 1) {
+      diffuse[channel] += tone.diffuse[channel] / count;
+      specular[channel] += tone.specular[channel] / count;
+    }
+    level += tone.level / count;
+  }
+  return { diffuse, specular, level };
+}
+
+function rewardMotePointLights(snapshot: GameSnapshot, now: number): WebGLPointLight[] {
+  const lights: WebGLPointLight[] = [];
+  for (const mote of snapshot.rewardMotes) {
+    const visual = rewardMoteVisualAt(mote, now);
+    if (!visual.active || visual.lightBrightness <= 0) continue;
+    const screenX = BOARD_X + visual.x * CELL_SIZE;
+    const screenY = BOARD_BOTTOM - visual.y * CELL_SIZE;
+    const world = screenCenterToWorld(
+      screenX,
+      screenY,
+      VIEW_CENTER_X,
+      VIEW_CENTER_Y,
+      WORLD_UNITS_PER_PIXEL,
+    );
+    lights.push({
+      position: [world[0], world[1], -ORIGINAL_CAMERA_DISTANCE + 3],
+      color: [
+        visual.lightColor[0] * visual.lightBrightness,
+        visual.lightColor[1] * visual.lightBrightness,
+        visual.lightColor[2] * visual.lightBrightness,
+      ],
+    });
+  }
+  return lights;
+}
+
+function garbageLightBounds(
+  worldCenter: Vector3,
+  widthCells: number,
+  heightCells: number,
+): WebGLLightBounds {
+  return [
+    worldCenter[0] - (widthCells - 1),
+    worldCenter[1] - (heightCells - 1),
+    worldCenter[0] + (widthCells - 1),
+    worldCenter[1] + (heightCells - 1),
+  ];
 }
 
 function getBlockWebGLLayer(): BlockWebGLLayer | null {
@@ -464,15 +583,18 @@ export function prepareSparkleTextures(): void {
   for (const color of BLOCK_COLORS) sparkleTexture("four", color);
   sparkleTexture("four", WHITE_STAR_COLOR);
   sparkleTexture("five", HUD_STAR_COLOR);
-  for (const style of [
-    "four",
-    "five",
-    "six",
-    "special",
-    "multiplier-one",
-    "multiplier-two",
-    "multiplier-three",
-  ] as const) sparkleTexture(style, REWARD_STAR_COLOR);
+  for (const [style, colorIndex] of [
+    ["four", 0],
+    ["five", 0],
+    ["six", 0],
+    ["special", 4],
+    ["multiplier-one", 0],
+    ["multiplier-two", 0],
+    ["multiplier-three", 0],
+    ["multiplier-three", 1],
+    ["multiplier-three", 2],
+    ["multiplier-three", 3],
+  ] as const) sparkleTexture(style, [...REWARD_MOTE_PALETTE[colorIndex]]);
 }
 
 function drawSparkle(
@@ -755,6 +877,7 @@ interface MeshRenderOptions {
   spinAxis?: Vector3;
   spinAngle?: number;
   scale?: number;
+  moteLights?: WebGLPointLight[];
 }
 
 function drawWorldMeshCube(
@@ -784,6 +907,12 @@ function drawWorldMeshCube(
     WORLD_UNITS_PER_PIXEL,
   );
   const scale = options.scale ?? 1;
+  const lightBounds: WebGLLightBounds = [
+    worldCenter[0],
+    worldCenter[1],
+    worldCenter[0],
+    worldCenter[1],
+  ];
   const transformedVertices = mesh.vertices.map((vertex) => {
     const transformed = transformDirection(vertex);
     return [
@@ -829,7 +958,12 @@ function drawWorldMeshCube(
     const projected = face.points.map((point) =>
       projectWorldPoint(point, VIEW_CENTER_X, VIEW_CENTER_Y, WORLD_UNITS_PER_PIXEL));
     const tones = (face.vertexNormals ?? [face.normal]).map((normal, index) =>
-      fixedFunctionVertexTone(normal, face.points[index] ?? face.points[0]));
+      fixedFunctionVertexTone(
+        normal,
+        face.points[index] ?? face.points[0],
+        options.moteLights,
+        lightBounds,
+      ));
     context.beginPath();
     projected.forEach(([x, y], index) => {
       if (index === 0) context.moveTo(x, y);
@@ -851,22 +985,13 @@ function drawWorldMeshCube(
         projected[brightest][0],
         projected[brightest][1],
       );
-      const middleLight = tones.reduce((sum, tone) => sum + tone.light, 0) / tones.length;
-      const middleSpecular = tones.reduce((sum, tone) => sum + tone.specular, 0) / tones.length;
-      gradient.addColorStop(0, colorToCss(
-        color,
-        tones[darkest].light,
-        tones[darkest].specular,
-      ));
-      gradient.addColorStop(0.52, colorToCss(color, middleLight, middleSpecular));
-      gradient.addColorStop(1, colorToCss(
-        color,
-        tones[brightest].light,
-        tones[brightest].specular,
-      ));
+      const middle = averageFixedFunctionTone(tones);
+      gradient.addColorStop(0, fixedFunctionColor(color, tones[darkest]));
+      gradient.addColorStop(0.52, fixedFunctionColor(color, middle));
+      gradient.addColorStop(1, fixedFunctionColor(color, tones[brightest]));
       context.fillStyle = gradient;
     } else {
-      context.fillStyle = colorToCss(color, tones[0].light, tones[0].specular);
+      context.fillStyle = fixedFunctionColor(color, tones[0]);
     }
     context.fill();
     context.strokeStyle = "rgba(0, 0, 0, .3)";
@@ -1002,6 +1127,7 @@ function drawBlockVisual(
   screenX: number,
   screenY: number,
   shadowBlur: number,
+  moteLights: WebGLPointLight[] = [],
 ): void {
   const {
     scale,
@@ -1032,6 +1158,7 @@ function drawBlockVisual(
         spinAxis,
         spinAngle,
         scale,
+        moteLights,
       },
     );
   } else {
@@ -1051,6 +1178,7 @@ function drawBlock(
   screenY: number,
   now: number,
   dimmed = false,
+  moteLights: WebGLPointLight[] = [],
 ): void {
   drawBlockVisual(
     context,
@@ -1059,6 +1187,7 @@ function drawBlock(
     screenX,
     screenY,
     cell.state === "clearing" ? 9 : 4,
+    moteLights,
   );
 }
 
@@ -1191,12 +1320,21 @@ function drawWebGLBlocks(
   assets: RenderAssets,
   now: number,
   garbageGroups: GarbageGroupRender[],
+  moteLights: WebGLPointLight[],
 ): boolean {
   if (!assets.blockMesh) return false;
   const layer = getBlockWebGLLayer();
   if (!layer || !layer.isAvailable()) return false;
   try {
-    return renderWebGLBlocks(context, snapshot, assets, now, garbageGroups, layer);
+    return renderWebGLBlocks(
+      context,
+      snapshot,
+      assets,
+      now,
+      garbageGroups,
+      moteLights,
+      layer,
+    );
   } catch {
     // Context loss can happen between any two WebGL calls. The Canvas2D path
     // below draws the complete frame until the layer reports a healthy restore.
@@ -1210,9 +1348,10 @@ function renderWebGLBlocks(
   assets: RenderAssets,
   now: number,
   garbageGroups: GarbageGroupRender[],
+  moteLights: WebGLPointLight[],
   layer: BlockWebGLLayer,
 ): boolean {
-  if (!assets.blockMesh || !layer.begin(assets.blockMesh)) return false;
+  if (!assets.blockMesh || !layer.begin(assets.blockMesh, moteLights)) return false;
 
   snapshot.nextRow.forEach((cell, x) => {
     if (!cell || cell.kind !== "block") return;
@@ -1320,6 +1459,12 @@ function renderWebGLBlocks(
       materialLight: 0.955,
       clipMinY: visual.clipMinY ?? undefined,
       doubleSided: visual.doubleSided,
+      lightBounds: garbageLightBounds(
+        visual.worldCenter,
+        visual.widthCells,
+        visual.heightCells,
+      ),
+      attenuateMoteLights: true,
     });
   }
 
@@ -1506,6 +1651,7 @@ function drawGarbage(
   assets: RenderAssets,
   now: number,
   drawBody = true,
+  moteLights: WebGLPointLight[] = [],
 ): void {
   const {
     mesh,
@@ -1521,6 +1667,7 @@ function drawGarbage(
   if (!visible) return;
   const renderedFaces: RenderedFace[] = [];
   const clipWorldY = clipMinY === null ? null : worldCenter[1] + clipMinY;
+  const lightBounds = garbageLightBounds(worldCenter, widthCells, heightCells);
 
   if (drawBody) {
     for (const face of mesh.faces) {
@@ -1572,6 +1719,9 @@ function drawGarbage(
     const tones = face.points.map((point, index) => fixedFunctionVertexTone(
       face.vertexNormals?.[index] ?? face.normal,
       point,
+      moteLights,
+      lightBounds,
+      0.1,
     ));
     context.beginPath();
     projected.forEach(([x, y], index) => {
@@ -1594,30 +1744,13 @@ function drawGarbage(
         projected[brightest][0],
         projected[brightest][1],
       );
-      const averageLight = tones.reduce((sum, tone) => sum + tone.light, 0) / tones.length;
-      const averageSpecular = tones.reduce((sum, tone) => sum + tone.specular, 0) / tones.length;
-      gradient.addColorStop(0, colorToCss(
-        color,
-        0.025 + tones[darkest].light * 0.975,
-        tones[darkest].specular,
-      ));
-      gradient.addColorStop(0.5, colorToCss(
-        color,
-        0.025 + averageLight * 0.975,
-        averageSpecular,
-      ));
-      gradient.addColorStop(1, colorToCss(
-        color,
-        0.025 + tones[brightest].light * 0.975,
-        tones[brightest].specular,
-      ));
+      const average = averageFixedFunctionTone(tones);
+      gradient.addColorStop(0, fixedFunctionColor(color, tones[darkest], 0.025));
+      gradient.addColorStop(0.5, fixedFunctionColor(color, average, 0.025));
+      gradient.addColorStop(1, fixedFunctionColor(color, tones[brightest], 0.025));
       context.fillStyle = gradient;
     } else {
-      context.fillStyle = colorToCss(
-        color,
-        0.025 + tones[0].light * 0.975,
-        tones[0].specular,
-      );
+      context.fillStyle = fixedFunctionColor(color, tones[0], 0.025);
     }
     context.fill();
     context.shadowBlur = 0;
@@ -1969,62 +2102,22 @@ function drawDeathSparks(
   context.restore();
 }
 
-function cubicBezier(
-  start: number,
-  controlOne: number,
-  controlTwo: number,
-  end: number,
-  amount: number,
-): number {
-  const inverse = 1 - amount;
-  return inverse ** 3 * start
-    + 3 * inverse ** 2 * amount * controlOne
-    + 3 * inverse * amount ** 2 * controlTwo
-    + amount ** 3 * end;
-}
-
 function drawRewardMote(
   context: CanvasRenderingContext2D,
   mote: RewardMote,
   now: number,
 ): void {
-  const startX = BOARD_X + mote.x * CELL_SIZE;
-  const startY = BOARD_BOTTOM - mote.y * CELL_SIZE;
-  const endX = BOARD_X + BOARD_WIDTH / 2;
-  const endY = BOARD_TOP - 64;
-  const holdDuration = Math.max(1, mote.launchAt - mote.startedAt);
-  const flightDuration = Math.max(1, mote.until - mote.launchAt);
-  let x = startX;
-  let y = startY;
-  let alpha = clamp((now - mote.startedAt) / Math.min(260, holdDuration));
-  let flight = 0;
-
-  if (now >= mote.launchAt) {
-    flight = clamp((now - mote.launchAt) / flightDuration);
-    const outwardPixels = mote.outward * CELL_SIZE;
-    x = cubicBezier(
-      startX,
-      startX + outwardPixels * 1.35,
-      endX + outwardPixels * 0.72,
-      endX,
-      flight,
-    );
-    y = cubicBezier(startY, startY - 92, BOARD_TOP + 128, endY, flight);
-    if (flight > 0.84) alpha *= (1 - flight) / 0.16;
-  }
-
-  const rotation = mote.rotation
-    + mote.angularVelocity * Math.max(0, now - mote.startedAt) / 1000;
-  const pulse = 1 + 0.07 * Math.sin((now - mote.startedAt) / 85);
+  const visual = rewardMoteVisualAt(mote, now);
+  if (!visual.active) return;
   drawSparkle(
     context,
     mote.style,
-    REWARD_STAR_COLOR,
-    x,
-    y,
-    mote.size * pulse,
-    rotation,
-    alpha,
+    visual.color,
+    BOARD_X + visual.x * CELL_SIZE,
+    BOARD_BOTTOM - visual.y * CELL_SIZE,
+    mote.size * (CELL_SIZE / 5),
+    visual.rotation,
+    visual.alpha,
     6,
   );
 }
@@ -2229,7 +2322,15 @@ export function drawGame(
     target.clip();
 
     const garbageGroups = collectGarbage(snapshot);
-    const usedWebGL = drawWebGLBlocks(target, snapshot, assets, now, garbageGroups);
+    const moteLights = rewardMotePointLights(snapshot, now);
+    const usedWebGL = drawWebGLBlocks(
+      target,
+      snapshot,
+      assets,
+      now,
+      garbageGroups,
+      moteLights,
+    );
     if (!usedWebGL) {
       snapshot.nextRow.forEach((cell, x) => {
         if (!cell || cell.kind !== "block") return;
@@ -2238,7 +2339,16 @@ export function drawGame(
           -1,
           snapshot.rise + snapshot.impactOffsetRows,
         );
-        drawBlock(target, cell, assets, position.x, position.y, now, true);
+        drawBlock(
+          target,
+          cell,
+          assets,
+          position.x,
+          position.y,
+          now,
+          true,
+          moteLights,
+        );
       });
 
       for (const group of garbageGroups) {
@@ -2258,6 +2368,7 @@ export function drawGame(
                 position.x,
                 position.y,
                 4,
+                moteLights,
               );
             } else {
               drawBlock(
@@ -2267,6 +2378,8 @@ export function drawGame(
                 position.x,
                 position.y,
                 now,
+                false,
+                moteLights,
               );
             }
           }
@@ -2300,6 +2413,7 @@ export function drawGame(
               position.x,
               position.y,
               4,
+              moteLights,
             );
           }
         }
@@ -2315,7 +2429,16 @@ export function drawGame(
             motion.y,
             snapshot.rise + snapshot.impactOffsetRows,
           );
-          drawBlock(target, cell, assets, position.x, position.y, now);
+          drawBlock(
+            target,
+            cell,
+            assets,
+            position.x,
+            position.y,
+            now,
+            false,
+            moteLights,
+          );
         }
       }
     }
@@ -2327,7 +2450,7 @@ export function drawGame(
         - Math.max(...left.positions.map(({ y }) => y))
     ));
     for (const group of garbagePaintOrder) {
-      drawGarbage(target, group, snapshot, assets, now, !usedWebGL);
+      drawGarbage(target, group, snapshot, assets, now, !usedWebGL, moteLights);
     }
     target.restore();
 
