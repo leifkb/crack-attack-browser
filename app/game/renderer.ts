@@ -31,7 +31,7 @@ import {
   createGarbageMesh,
   formatSoloScore,
   gameOverMaskBounds,
-  gameOverBounceHeight,
+  gameOverCenterY,
   garbageShatterVisual,
   levelLightColor,
   levelLightScreenY,
@@ -2166,8 +2166,12 @@ function drawGameOverArt(
   assets: RenderAssets,
 ): void {
   if (!imageReady(assets.messageGameOver)) return;
-  const heightInWorld = gameOverBounceHeight(snapshot.gameOverElapsedMs);
-  const centerY = VIEW_CENTER_Y - heightInWorld * (CELL_SIZE / 2);
+  const centerY = gameOverCenterY(
+    snapshot.gameOverElapsedMs,
+    BOARD_TOP,
+    BOARD_HEIGHT,
+    CELL_SIZE / 2,
+  );
   const size = CELL_SIZE * 6 * (75 / 64);
   drawCenteredAsset(context, assets.messageGameOver, size, size, centerY);
 }

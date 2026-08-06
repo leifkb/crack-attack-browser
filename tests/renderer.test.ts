@@ -13,7 +13,7 @@ import {
   createGarbageMesh,
   formatSoloScore,
   gameOverMaskBounds,
-  gameOverBounceHeight,
+  gameOverCenterY,
   garbageShatterVisual,
   levelLightColor,
   levelLightScreenY,
@@ -25,7 +25,9 @@ import { scoreToBeat } from "../app/game/highScore.ts";
 
 const CELL_SIZE = 62;
 const BOARD_X = 340;
+const BOARD_TOP = 38;
 const BOARD_WIDTH = 372;
+const BOARD_HEIGHT = 12 * CELL_SIZE;
 const BOARD_BOTTOM = 782;
 const VIEW_CENTER_X = BOARD_X + BOARD_WIDTH / 2;
 const VIEW_CENTER_Y = BOARD_BOTTOM - 4 * CELL_SIZE;
@@ -191,11 +193,19 @@ test("the countdown recreates the original rush toward the viewer", () => {
   assert.ok(goFade.alpha > 0 && goFade.alpha < 1);
 });
 
-test("game over falls from above and settles after the original bounces", () => {
-  assert.equal(gameOverBounceHeight(0), 18);
-  assert.ok(gameOverBounceHeight(1000) < 18);
-  assert.ok(gameOverBounceHeight(1000) >= 0);
-  assert.equal(gameOverBounceHeight(10000), 0);
+test("game over falls from above and settles at the original playfield midpoint", () => {
+  const pixelsPerWorldUnit = CELL_SIZE / 2;
+  const middle = gameOverCenterY(
+    1000,
+    BOARD_TOP,
+    BOARD_HEIGHT,
+    pixelsPerWorldUnit,
+  );
+
+  assert.equal(gameOverCenterY(0, BOARD_TOP, BOARD_HEIGHT, pixelsPerWorldUnit), -148);
+  assert.ok(middle < 410);
+  assert.ok(middle >= -148);
+  assert.equal(gameOverCenterY(10000, BOARD_TOP, BOARD_HEIGHT, pixelsPerWorldUnit), 410);
 });
 
 test("garbage flashes twice, then its 3D shell clips away bottom-to-top", () => {
@@ -238,11 +248,11 @@ test("retained garbage sections crunch before the shell closes smoothly", () => 
 });
 
 test("the game-over blackout covers projected pieces beyond every board edge", () => {
-  const bounds = gameOverMaskBounds(BOARD_X, 38, BOARD_WIDTH, 744, CELL_SIZE);
+  const bounds = gameOverMaskBounds(BOARD_X, BOARD_TOP, BOARD_WIDTH, BOARD_HEIGHT, CELL_SIZE);
   assert.ok(bounds.x < BOARD_X - 2);
   assert.ok(bounds.x + bounds.width > BOARD_X + BOARD_WIDTH + 2);
-  assert.ok(bounds.y < 38);
-  assert.ok(bounds.y + bounds.height > 38 + 744);
+  assert.ok(bounds.y < BOARD_TOP);
+  assert.ok(bounds.y + bounds.height > BOARD_TOP + BOARD_HEIGHT);
 });
 
 test("level lights share the block grid's row boundaries from bottom to top", () => {
