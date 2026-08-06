@@ -8,18 +8,19 @@ const gameComponent = readFileSync(
   "utf8",
 );
 
-test("a real glide neutralizes the directional press highlight", () => {
+test("directional feedback follows explicit pointer state instead of sticky pseudostates", () => {
   assert.match(
     styles,
-    /\.gesture-pad\.is-gliding \.pad-zone\s*\{[^}]*background:\s*transparent;[^}]*color:\s*#7f8ab8;/s,
+    /\.pad-zone\.is-pressed\s*\{[^}]*background:\s*rgba\(120, 137, 235, 0\.08\);[^}]*color:\s*#ffffff;/s,
+  );
+  assert.doesNotMatch(styles, /\.pad-zone:(?:hover|active)/);
+  assert.match(
+    gameComponent,
+    /pressedDirection:\s*gesture\.movedCursor \? null : gesture\.tapDirection/,
   );
   assert.match(
     gameComponent,
-    /gliding:\s*gesture\.movedCursor/,
-  );
-  assert.match(
-    gameComponent,
-    /thumbpadVisual\.gliding \? " is-gliding" : ""/,
+    /thumbpadVisual\.pressedDirection === "up" \? " is-pressed" : ""/,
   );
 });
 
