@@ -19,6 +19,7 @@ import {
   levelLightScreenY,
   loseBarToneAt,
   loseBarVisual,
+  playfieldVisible,
   retainedGarbageVisual,
 } from "../app/game/renderGeometry.ts";
 import { scoreToBeat } from "../app/game/highScore.ts";
@@ -159,12 +160,14 @@ test("the block asset keeps the original high-detail folds and beveled edges", (
   );
 });
 
-test("both level-light columns can use the same un-faded occupancy colors", () => {
+test("level lights preserve occupancy color through danger and row-impact flashes", () => {
   const empty = levelLightColor(false, 0);
   const occupied = levelLightColor(true, 0);
   const halfway = levelLightColor(0.5, 0);
-  const dangerRed = levelLightColor(false, 560);
-  const dangerWhite = levelLightColor(false, 280);
+  const dangerEmpty = levelLightColor(false, 260);
+  const dangerOccupied = levelLightColor(true, 260);
+  const dangerWhite = levelLightColor(false, 130);
+  const impactWhite = levelLightColor(false, 0, 1);
 
   assert.ok(empty[2] > 0.95 && empty[0] < 0.1, "an empty level is solid blue");
   assert.ok(occupied[0] > 0.95 && occupied[2] < 0.1, "an occupied level is solid red");
@@ -172,8 +175,10 @@ test("both level-light columns can use the same un-faded occupancy colors", () =
     halfway[0] > 0.7 && halfway[2] > 0.7,
     "the original square-root fade visibly passes through purple",
   );
-  assert.deepEqual(dangerRed, occupied, "the full-board flash begins at red");
+  assert.deepEqual(dangerEmpty, empty, "danger preserves an empty level's blue base");
+  assert.deepEqual(dangerOccupied, occupied, "danger preserves an occupied level's red base");
   assert.deepEqual(dangerWhite, [1, 1, 1], "the full-board flash reaches white");
+  assert.deepEqual(impactWhite, [1, 1, 1], "an impacted row independently reaches white");
 });
 
 test("the countdown recreates the original rush toward the viewer", () => {
@@ -289,6 +294,30 @@ test("the lose bar advances from blue through purple to red", () => {
   assert.equal(critical.progress, 0.5);
   assert.deepEqual(critical.leading, [0.8, 0, 0]);
   assert.equal(lost.progress, 1);
+});
+
+test("the lose bar retains its filled edge while fading and resetting", () => {
+  const lowFade = loseBarVisual({ phase: "fade-low", progress: 0.4, fade: 0.5 });
+  const highFade = loseBarVisual({ phase: "fade-high", progress: 0.6, fade: 0.5 });
+  const reset = loseBarVisual({ phase: "reset-high", progress: 0.2, fade: 0.5 });
+
+  assert.equal(lowFade.progress, 0.4);
+  assert.deepEqual(lowFade.leading, [0.32, 0, 0.72]);
+  assert.deepEqual(lowFade.trailing, [0, 0, 0.8]);
+  assert.equal(highFade.progress, 0.6);
+  assert.deepEqual(highFade.leading, [0.4, 0, 0.4]);
+  assert.deepEqual(highFade.trailing, [0.32, 0, 0.72]);
+  assert.equal(reset.progress, 0.2);
+  assert.deepEqual(reset.leading, [0.72, 0, 0.32]);
+  assert.deepEqual(reset.trailing, [0.64, 0, 0.64]);
+});
+
+test("pause omits the board and swapper while retaining the surrounding scene", () => {
+  assert.equal(playfieldVisible("ready"), false);
+  assert.equal(playfieldVisible("paused"), false);
+  assert.equal(playfieldVisible("countdown"), true);
+  assert.equal(playfieldVisible("playing"), true);
+  assert.equal(playfieldVisible("gameover"), true);
 });
 
 test("the lose bar highlight peaks in the upper third without changing its material colors", () => {

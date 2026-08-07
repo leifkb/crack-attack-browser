@@ -67,10 +67,10 @@ export function gameKeyboardAction({
   }
 
   if (normalized === "p" && !repeat) return "pause";
-  if (normalized === "arrowleft" || normalized === "a") return "move-left";
-  if (normalized === "arrowright" || normalized === "d") return "move-right";
-  if (normalized === "arrowup" || normalized === "w") return "move-up";
-  if (normalized === "arrowdown" || normalized === "s") return "move-down";
+  if ((normalized === "arrowleft" || normalized === "a") && !repeat) return "move-left";
+  if ((normalized === "arrowright" || normalized === "d") && !repeat) return "move-right";
+  if ((normalized === "arrowup" || normalized === "w") && !repeat) return "move-up";
+  if ((normalized === "arrowdown" || normalized === "s") && !repeat) return "move-down";
   if (status !== "playing") return null;
   if ((normalized === " " || normalized === "k") && !repeat) return "swap";
   if (normalized === "enter" || normalized === "l") return "raise";

@@ -42,6 +42,13 @@ test("only actions available in the current game state are handled", () => {
   assert.equal(gameKeyboardAction({ status: "playing", key: " " }), "swap");
 });
 
+test("held movement keys wait for a fresh key edge instead of browser repeat", () => {
+  for (const key of ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "a", "d", "w", "s"]) {
+    assert.notEqual(gameKeyboardAction({ status: "playing", key }), null);
+    assert.equal(gameKeyboardAction({ status: "playing", key, repeat: true }), null);
+  }
+});
+
 test("touch controls appear for hybrid devices as well as coarse-primary devices", () => {
   assert.equal(hasTouchControls(true, 0), true);
   assert.equal(hasTouchControls(false, 5), true);

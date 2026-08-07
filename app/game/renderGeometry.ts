@@ -1,3 +1,5 @@
+import type { GameStatus, LoseBarState } from "./engine";
+
 export type Vector3 = [number, number, number];
 export type Color3 = [number, number, number];
 
@@ -9,7 +11,7 @@ const LEVEL_LIGHT_WHITE: Color3 = [1, 1, 1];
 const LOSE_BAR_BLUE: Color3 = [0, 0, 0.8];
 const LOSE_BAR_PURPLE: Color3 = [0.64, 0, 0.64];
 const LOSE_BAR_RED: Color3 = [0.8, 0, 0];
-const LEVEL_LIGHT_FLASH_MS = 560;
+const LEVEL_LIGHT_FLASH_MS = 13 * 20;
 
 const LOSE_BAR_TONES = [
   { position: 0, light: 0.44, specular: 0.082 },
@@ -30,6 +32,10 @@ function mixColor(from: Color3, to: Color3, amount: number): Color3 {
     from[1] + (to[1] - from[1]) * amount,
     from[2] + (to[2] - from[2]) * amount,
   ];
+}
+
+export function playfieldVisible(status: GameStatus): boolean {
+  return status !== "ready" && status !== "paused";
 }
 
 export interface BlockMaterialVisual {
@@ -67,20 +73,27 @@ function normalize(vector: Vector3): Vector3 {
   return [vector[0] / length, vector[1] / length, vector[2] / length];
 }
 
-export function levelLightColor(occupancy: boolean | number, dangerMs: number): Color3 {
-  if (dangerMs <= 0) {
-    const blend = clamp(typeof occupancy === "boolean" ? (occupancy ? 1 : 0) : occupancy);
-    const redEnergy = Math.sqrt(blend);
-    const blueEnergy = Math.sqrt(1 - blend);
-    return [
-      LEVEL_LIGHT_RED[0] * redEnergy + LEVEL_LIGHT_BLUE[0] * blueEnergy,
-      LEVEL_LIGHT_RED[1] * redEnergy + LEVEL_LIGHT_BLUE[1] * blueEnergy,
-      LEVEL_LIGHT_RED[2] * redEnergy + LEVEL_LIGHT_BLUE[2] * blueEnergy,
-    ];
-  }
-  const phase = (dangerMs % LEVEL_LIGHT_FLASH_MS) / LEVEL_LIGHT_FLASH_MS;
-  const whiteAmount = Math.sin(phase * Math.PI) ** 2;
-  return mixColor(LEVEL_LIGHT_RED, LEVEL_LIGHT_WHITE, whiteAmount);
+export function levelLightColor(
+  occupancy: boolean | number,
+  dangerMs: number,
+  impactFlash = 0,
+): Color3 {
+  const blend = clamp(typeof occupancy === "boolean" ? (occupancy ? 1 : 0) : occupancy);
+  const redEnergy = Math.sqrt(blend);
+  const blueEnergy = Math.sqrt(1 - blend);
+  const base: Color3 = [
+    LEVEL_LIGHT_RED[0] * redEnergy + LEVEL_LIGHT_BLUE[0] * blueEnergy,
+    LEVEL_LIGHT_RED[1] * redEnergy + LEVEL_LIGHT_BLUE[1] * blueEnergy,
+    LEVEL_LIGHT_RED[2] * redEnergy + LEVEL_LIGHT_BLUE[2] * blueEnergy,
+  ];
+  const phase = dangerMs > 0
+    ? (dangerMs % LEVEL_LIGHT_FLASH_MS) / LEVEL_LIGHT_FLASH_MS
+    : 0;
+  const dangerFlash = dangerMs > 0
+    ? (phase <= 0.5 ? phase * 2 : (1 - phase) * 2)
+    : 0;
+  const whiteAmount = 1 - (1 - dangerFlash) * (1 - clamp(impactFlash));
+  return mixColor(base, LEVEL_LIGHT_WHITE, whiteAmount);
 }
 
 export interface CountdownVisual {
@@ -293,10 +306,59 @@ export function loseBarToneAt(verticalPosition: number): LoseBarTone {
 }
 
 export function loseBarVisual(
-  dangerMs: number,
+  danger: number | LoseBarState,
   lossDelayMs = 7000,
   highAlertMs = lossDelayMs - 1000,
 ): LoseBarVisual {
+  if (typeof danger !== "number") {
+    const progress = clamp(danger.progress);
+    const fade = clamp(danger.fade);
+    switch (danger.phase) {
+      case "low":
+        return {
+          phase: "warning",
+          progress,
+          leading: LOSE_BAR_PURPLE,
+          trailing: LOSE_BAR_BLUE,
+        };
+      case "high":
+        return {
+          phase: "critical",
+          progress,
+          leading: LOSE_BAR_RED,
+          trailing: LOSE_BAR_PURPLE,
+        };
+      case "fade-low":
+        return {
+          phase: "warning",
+          progress,
+          leading: mixColor(LOSE_BAR_BLUE, LOSE_BAR_PURPLE, fade),
+          trailing: LOSE_BAR_BLUE,
+        };
+      case "fade-high":
+        return {
+          phase: "critical",
+          progress,
+          leading: mixColor(LOSE_BAR_BLUE, LOSE_BAR_RED, fade),
+          trailing: mixColor(LOSE_BAR_BLUE, LOSE_BAR_PURPLE, fade),
+        };
+      case "reset-high":
+        return {
+          phase: "critical",
+          progress,
+          leading: mixColor(LOSE_BAR_PURPLE, LOSE_BAR_RED, fade),
+          trailing: LOSE_BAR_PURPLE,
+        };
+      default:
+        return {
+          phase: "safe",
+          progress: 0,
+          leading: LOSE_BAR_BLUE,
+          trailing: LOSE_BAR_BLUE,
+        };
+    }
+  }
+  const dangerMs = danger;
   const highAlertBoundaryMs = clamp(highAlertMs, 0, lossDelayMs);
   if (dangerMs <= 0) {
     return {

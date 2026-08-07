@@ -7,6 +7,7 @@ import {
   AWAKEN_INTERNAL_DELAY_MS,
   BLOCK_CLEAR_DURATION_MS,
   BOARD_COLUMNS,
+  BUFFER_ROWS,
   COUNTDOWN_SEGMENT_MS,
   COUNTDOWN_START_DELAY_MS,
   CURSOR_MOVE_DURATION_MS,
@@ -16,40 +17,51 @@ import {
   GAME_OVER_RESTART_DELAY_MS,
   GARBAGE_QUEUE_CAPACITY,
   LEVEL_LIGHT_FADE_MS,
+  LEVEL_LIGHT_IMPACT_FLASH_MS,
+  LOSE_BAR_FADE_TICKS,
   REWARD_MOTE_HOLD_MS,
   REWARD_MOTE_LIGHT_PALETTE,
   REWARD_MOTE_SIBLING_DELAY_MS,
+  REWARD_SIGN_LIFETIME_MS,
   SWAP_DURATION_MS,
   VISIBLE_ROWS,
   baseScoreFor,
   createEmptyBoard,
   creepRowsPerSecond,
+  deathSparkVisualAt,
   findMatchCoordinates,
   findMatches,
   magnitudeAttacks,
   rewardMoteDefinition,
   rewardMoteVisualAt,
+  rewardSignVisualAt,
   type AttackPayload,
   type Board,
   type BlockCell,
   type BlockFlavor,
   type Coordinate,
+  type DeathSpark,
   type GameStatus,
   type GarbageCell,
   type MatchPattern,
   type RewardMote,
+  type RewardSign,
 } from "../app/game/engine.ts";
 
 function block(id: number, flavor: BlockFlavor): BlockCell {
   return { id, kind: "block", flavor, state: "idle" };
 }
 
-function garbage(id: number, groupId: number): GarbageCell {
+function garbage(
+  id: number,
+  groupId: number,
+  flavor: GarbageCell["flavor"] = "normal",
+): GarbageCell {
   return {
     id,
     kind: "garbage",
     groupId,
-    flavor: "normal",
+    flavor,
     texture: 0,
     state: "idle",
   };
@@ -72,7 +84,12 @@ interface EngineHarness {
   rise: number;
   score: number;
   rewardMotes: RewardMote[];
+  rewardSigns: RewardSign[];
+  deathSparks: DeathSpark[];
   queuedAttacks: Array<AttackPayload & { dropAt: number }>;
+  loseBarPhase: "inactive" | "low" | "high" | "fade-low" | "fade-high" | "reset-high";
+  loseBarProgress: number;
+  loseBarFadeTicks: number;
   startClear(
     matches: Coordinate[],
     chainStep: boolean,
@@ -89,10 +106,29 @@ interface EngineHarness {
     now: number,
     sibling: number,
   ): void;
+  createRewardSign(
+    kind: "magnitude" | "multiplier",
+    value: number,
+    anchor: Coordinate,
+    now: number,
+  ): void;
+  createBlockDeathSparks(
+    x: number,
+    y: number,
+    flavor: BlockFlavor,
+    count: number,
+    now: number,
+  ): void;
   dropGarbage(
     attack: AttackPayload & { dropAt: number },
     now: number,
   ): boolean;
+  markShatteringGarbage(
+    direct: Set<number>,
+    clearStarted: number,
+    clearUntil: number,
+    comboId: number,
+  ): void;
 }
 
 function harness(engine: CrackAttackEngine): EngineHarness {
@@ -1546,4 +1582,355 @@ test("the awakening preview stays fixed, permits planning swaps, then creates a 
   assert.equal(snapshot.phase, "clearing");
   assert.equal(snapshot.chainDepth, 2);
   assert.ok(engine.drainEvents().some((event) => event.type === "chain" && event.depth === 2));
+});
+
+test("due garbage drops during clearing and awakening instead of waiting for a global phase", () => {
+  const clearingEngine = new CrackAttackEngine({ seed: 0x717273 });
+  const clearing = harness(clearingEngine);
+  const clearingBoard = createEmptyBoard();
+  const dying = block(10000, 0);
+  dying.state = "clearing";
+  dying.clearStarted = 1000;
+  dying.clearUntil = 5000;
+  clearingBoard[0][5] = dying;
+  clearing.board = clearingBoard;
+  clearing.status = "playing";
+  clearing.phase = "clearing";
+  clearing.phaseUntil = 5000;
+  clearing.lastUpdate = 1000;
+  clearing.queuedAttacks = [{
+    height: 1,
+    width: 1,
+    flavor: "normal",
+    source: "clear",
+    createdAt: 0,
+    dropAt: 1020,
+  }];
+
+  clearingEngine.update(1020);
+  assert.equal(clearingEngine.getSnapshot(1020).incomingCount, 0);
+  assert.ok(
+    clearingBoard.some((row) => row.some((cell) => (
+      cell?.kind === "garbage" && cell.initialFallUntil !== undefined
+    ))),
+  );
+
+  const awakeningEngine = new CrackAttackEngine({ seed: 0x747576 });
+  const awakening = harness(awakeningEngine);
+  const awakeningBoard = createEmptyBoard();
+  const preview = garbage(10100, 101);
+  preview.state = "awakening";
+  preview.awakenRevealAt = 1000;
+  preview.awakenReleaseAt = 5000;
+  awakeningBoard[0][5] = preview;
+  awakening.board = awakeningBoard;
+  awakening.status = "playing";
+  awakening.phase = "idle";
+  awakening.lastUpdate = 1000;
+  awakening.queuedAttacks = [{
+    height: 1,
+    width: 1,
+    flavor: "normal",
+    source: "clear",
+    createdAt: 0,
+    dropAt: 1020,
+  }];
+
+  awakeningEngine.update(1020);
+  assert.equal(awakeningEngine.getSnapshot(1020).incomingCount, 0);
+  assert.equal(
+    new Set(
+      awakeningBoard.flat()
+        .filter((cell): cell is GarbageCell => cell?.kind === "garbage")
+        .map((cell) => cell.groupId),
+    ).size,
+    2,
+  );
+});
+
+test("all same-tick garbage attacks fall concurrently and report their own impacts", () => {
+  const engine = new CrackAttackEngine({ seed: 0x777879 });
+  const internals = harness(engine);
+  internals.board = createEmptyBoard();
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.lastUpdate = 1000;
+  internals.queuedAttacks = [0, 1].map(() => ({
+    height: 1,
+    width: BOARD_COLUMNS,
+    flavor: "normal" as const,
+    source: "clear" as const,
+    createdAt: 0,
+    dropAt: 1020,
+  }));
+
+  engine.update(1020);
+  const falling = internals.board.flat()
+    .filter((cell): cell is GarbageCell => cell?.kind === "garbage");
+  assert.equal(new Set(falling.map((cell) => cell.groupId)).size, 2);
+  assert.equal(new Set(falling.map((cell) => cell.initialFallUntil)).size, 1);
+  assert.equal(engine.getSnapshot(1020).incomingCount, 0);
+  assert.equal(
+    engine.drainEvents().filter((event) => event.type === "garbage").length,
+    2,
+  );
+
+  const landingAt = falling[0].initialFallUntil as number;
+  engine.update(landingAt);
+  assert.deepEqual(
+    engine.drainEvents().filter((event) => event.type === "garbage-impact"),
+    [
+      { type: "garbage-impact", area: BOARD_COLUMNS },
+      { type: "garbage-impact", area: BOARD_COLUMNS },
+    ],
+  );
+
+  engine.update(landingAt + 2 * 20);
+  const flashes = engine.getSnapshot(landingAt + 2 * 20).levelLightImpactFlashes;
+  assert.equal(flashes[0], 1);
+  assert.equal(flashes[1], 1);
+  assert.ok(flashes.slice(2).every((flash) => flash === 0));
+  assert.equal(LEVEL_LIGHT_IMPACT_FLASH_MS, 20 * 20);
+});
+
+test("a directly hit gray garbage group shatters through touching gray groups only", () => {
+  const engine = new CrackAttackEngine({ seed: 0x818283 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  board[2][0] = garbage(11000, 110, "gray");
+  board[3][0] = garbage(11001, 111, "gray");
+  board[4][0] = garbage(11002, 112, "normal");
+  internals.board = board;
+
+  internals.markShatteringGarbage(new Set([110]), 1000, 2300, 1);
+
+  assert.equal((board[2][0] as GarbageCell).state, "shattering");
+  assert.equal((board[3][0] as GarbageCell).state, "shattering");
+  assert.equal(
+    (board[4][0] as GarbageCell).state,
+    "idle",
+    "normal garbage does not inherit a gray propagation wave",
+  );
+});
+
+test("garbage flavor decals use one random interior two-cell slot on tall pieces only", () => {
+  const engine = new CrackAttackEngine({ seed: 0x848586 });
+  const internals = harness(engine);
+  internals.board = createEmptyBoard();
+  internals.random = () => 0.5;
+
+  assert.equal(internals.dropGarbage({
+    height: 4,
+    width: BOARD_COLUMNS,
+    flavor: "normal",
+    source: "chain",
+    createdAt: 1000,
+    dropAt: 1000,
+  }, 1000), true);
+  const firstGroup = internals.board.flat()
+    .find((cell): cell is GarbageCell => cell?.kind === "garbage")?.groupId as number;
+  const first = internals.board.flat().filter((cell): cell is GarbageCell => (
+    cell?.kind === "garbage" && cell.groupId === firstGroup
+  ));
+  assert.ok(first.every((cell) => cell.texture === 2));
+  assert.ok(first.every((cell) => cell.decalX === 2 && cell.decalY === 1));
+
+  assert.equal(internals.dropGarbage({
+    height: 4,
+    width: BOARD_COLUMNS,
+    flavor: "normal",
+    source: "chain",
+    createdAt: 1000,
+    dropAt: 1000,
+  }, 1000), true);
+  const second = internals.board.flat().filter((cell): cell is GarbageCell => (
+    cell?.kind === "garbage" && cell.groupId !== firstGroup
+  ));
+  assert.ok(second.every((cell) => cell.texture === null));
+
+  const shortEngine = new CrackAttackEngine({ seed: 0x878889 });
+  const short = harness(shortEngine);
+  short.board = createEmptyBoard();
+  short.random = () => 0.5;
+  assert.equal(short.dropGarbage({
+    height: 3,
+    width: BOARD_COLUMNS,
+    flavor: "normal",
+    source: "clear",
+    createdAt: 1000,
+    dropAt: 1000,
+  }, 1000), true);
+  assert.ok(short.board.flat().every((cell) => (
+    cell?.kind !== "garbage" || cell.texture === null
+  )));
+  assert.equal(BUFFER_ROWS, 44, "the active board retains every desktop row above the creep row");
+});
+
+test("reward signs retain the desktop lifetime, collision slots, motion, and cap", () => {
+  const engine = new CrackAttackEngine({ seed: 0x909192 });
+  const internals = harness(engine);
+  internals.random = () => 0.5;
+  internals.createRewardSign("magnitude", 4, { x: 0, y: 0 }, 1000);
+  internals.createRewardSign("magnitude", 5, { x: 0, y: 0 }, 1000);
+
+  assert.deepEqual(
+    internals.rewardSigns.map(({ gridX, gridY, x, y }) => ({ gridX, gridY, x, y })),
+    [
+      { gridX: 1, gridY: 1, x: 0.5, y: 0.5 },
+      { gridX: 1, gridY: 2, x: 0.5, y: 1.5 },
+    ],
+  );
+  assert.ok(internals.rewardSigns.every((sign) => (
+    sign.until - sign.startedAt === REWARD_SIGN_LIFETIME_MS
+  )));
+
+  const visual = rewardSignVisualAt(internals.rewardSigns[0], 5000);
+  assert.equal(visual.alpha, 0.25);
+  assert.equal(visual.scale, 2);
+  assert.ok(Math.abs(visual.verticalMovementRows - 0.301) < 1e-12);
+  const expiredVisual = rewardSignVisualAt(internals.rewardSigns[0], 7000);
+  assert.equal(expiredVisual.alpha, 0);
+  assert.equal(expiredVisual.scale, 5);
+  assert.ok(Math.abs(expiredVisual.verticalMovementRows - 0.501) < 1e-12);
+  assert.equal(engine.getSnapshot(6999).rewardSigns.length, 2);
+  assert.equal(engine.getSnapshot(7000).rewardSigns.length, 0);
+
+  for (let index = 0; index < 30; index += 1) {
+    internals.createRewardSign("magnitude", 4, { x: 2, y: 2 }, 1000);
+  }
+  assert.equal(internals.rewardSigns.length, 25);
+});
+
+test("death sparks use desktop drag, gravity, lifetimes, pulse, and uncapped clear counts", () => {
+  const spark: DeathSpark = {
+    id: 1,
+    flavor: 0,
+    x: 2,
+    y: 3,
+    velocityX: 0.05,
+    velocityY: 0.06,
+    rotation: 0.2,
+    angularVelocity: 0.1,
+    size: 1,
+    startedAt: 1000,
+    until: 3000,
+  };
+  const firstTick = deathSparkVisualAt(spark, 1020);
+  assert.ok(Math.abs(firstTick.x - 2.05) < 1e-12);
+  assert.ok(Math.abs(firstTick.y - 3.06) < 1e-12);
+  assert.ok(Math.abs(firstTick.rotation - 0.3) < 1e-12);
+  assert.equal(firstTick.alpha, 1);
+  assert.equal(firstTick.pulse, 0);
+  const secondTick = deathSparkVisualAt(spark, 1040);
+  assert.ok(Math.abs(secondTick.x - (2 + 0.05 * 1.999)) < 1e-12);
+  assert.ok(Math.abs(secondTick.y - (3 + 0.06 + 0.05944)) < 1e-12);
+  assert.equal(deathSparkVisualAt(spark, spark.until - 18 * 20).pulse, 1);
+  assert.equal(deathSparkVisualAt(spark, spark.until - 7.5 * 20).alpha, 0.5);
+
+  const engine = new CrackAttackEngine({ seed: 0x939495 });
+  const internals = harness(engine);
+  internals.createBlockDeathSparks(2, 3, 4, 40, 1000);
+  assert.equal(internals.deathSparks.length, 40, "large clears are no longer truncated at 18 stars");
+  for (const generated of internals.deathSparks) {
+    const speed = Math.hypot(generated.velocityX, generated.velocityY);
+    const lifeTicks = (generated.until - generated.startedAt) / 20;
+    const angularDegrees = Math.abs(generated.angularVelocity) * 180 / Math.PI;
+    assert.ok(speed >= 0.01 && speed < 0.075);
+    assert.ok(lifeTicks >= 70 && lifeTicks <= 1698);
+    assert.ok(lifeTicks <= 168 || lifeTicks >= 700);
+    assert.ok(angularDegrees >= 1 && angularDegrees < 15);
+    assert.ok(Math.abs(generated.rotation * 180 / Math.PI - Math.round(
+      generated.rotation * 180 / Math.PI,
+    )) < 1e-9);
+  }
+
+  const board = createEmptyBoard();
+  for (let x = 0; x < 3; x += 1) board[0][x] = block(12000 + x, 2);
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.startClear([{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }], false, 2000);
+  const axes = board[0].slice(0, 3).map((cell) => (cell as BlockCell).deathSpinAxis);
+  assert.ok(axes.every((axis) => axis !== undefined && axis >= 0 && axis < Math.PI * 2));
+  assert.ok(new Set(axes).size > 1, "each dying block chooses its own random tumble axis");
+});
+
+test("the lose bar fades out from both alerts and eases a reset high alert", () => {
+  const engine = new CrackAttackEngine({ seed: 0x969798 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  board[VISIBLE_ROWS - 1][0] = block(13000, 0);
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.lastUpdate = 1000;
+
+  engine.update(1020);
+  let state = engine.getSnapshot(1020).loseBar;
+  assert.equal(state.phase, "low");
+  assert.equal(state.progress, 20 / DANGER_HIGH_ALERT_MS);
+
+  board[VISIBLE_ROWS - 1][0] = null;
+  engine.update(1040);
+  state = engine.getSnapshot(1040).loseBar;
+  assert.deepEqual(state, { phase: "fade-low", progress: 20 / DANGER_HIGH_ALERT_MS, fade: 1 });
+  engine.update(1040 + LOSE_BAR_FADE_TICKS * 20);
+  assert.deepEqual(engine.getSnapshot(1440).loseBar, {
+    phase: "inactive",
+    progress: 0,
+    fade: 0,
+  });
+
+  board[VISIBLE_ROWS - 1][0] = block(13001, 1);
+  internals.loseBarPhase = "low";
+  internals.dangerMs = DANGER_HIGH_ALERT_MS - 20;
+  engine.update(1460);
+  assert.equal(engine.getSnapshot(1460).loseBar.phase, "high");
+
+  const dying = block(13002, 2);
+  dying.state = "clearing";
+  dying.clearStarted = 1460;
+  dying.clearUntil = 5000;
+  board[0][1] = dying;
+  internals.dangerMs = DANGER_HIGH_ALERT_MS + 500;
+  engine.update(1480);
+  assert.deepEqual(engine.getSnapshot(1480).loseBar, {
+    phase: "reset-high",
+    progress: 0,
+    fade: (LOSE_BAR_FADE_TICKS - 1) / LOSE_BAR_FADE_TICKS,
+  });
+
+  const highFadeEngine = new CrackAttackEngine({ seed: 0x999a9b });
+  const highFade = harness(highFadeEngine);
+  highFade.board = createEmptyBoard();
+  highFade.status = "playing";
+  highFade.phase = "idle";
+  highFade.lastUpdate = 1000;
+  highFade.loseBarPhase = "high";
+  highFade.loseBarProgress = 0.5;
+  highFadeEngine.update(1020);
+  assert.deepEqual(highFadeEngine.getSnapshot(1020).loseBar, {
+    phase: "fade-high",
+    progress: 0.5,
+    fade: 1,
+  });
+
+  const restartEngine = new CrackAttackEngine({ seed: 0x9c9d9e });
+  const restart = harness(restartEngine);
+  restart.status = "gameover";
+  restart.gameOverAt = 0;
+  restart.loseBarPhase = "high";
+  restart.loseBarProgress = 1;
+  assert.equal(restartEngine.start(2000, 0x9fa0a1), true);
+  assert.deepEqual(restartEngine.getSnapshot(2000).loseBar, {
+    phase: "fade-high",
+    progress: 1,
+    fade: 1,
+  });
+  restartEngine.update(2000 + COUNTDOWN_START_DELAY_MS);
+  assert.deepEqual(restartEngine.getSnapshot(5000).loseBar, {
+    phase: "fade-high",
+    progress: 1,
+    fade: (LOSE_BAR_FADE_TICKS - 1) / LOSE_BAR_FADE_TICKS,
+  });
 });
