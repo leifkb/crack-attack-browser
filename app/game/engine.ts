@@ -13,7 +13,9 @@
 
 export const BOARD_COLUMNS = 6;
 export const VISIBLE_ROWS = 12;
-export const BUFFER_ROWS = 24;
+// The desktop grid keeps 45 logical rows including y=0, the hidden creep row.
+// `nextRow` models y=0 separately, leaving 44 rows in the active board.
+export const BUFFER_ROWS = 44;
 export const NORMAL_FLAVOR_COUNT = 5;
 export const GRAY_FLAVOR = 5;
 export const AWAKEN_INITIAL_DELAY_MS = 1300;
@@ -33,12 +35,19 @@ export const DANGER_LOSS_DELAY_MS = 7000;
 export const DANGER_ELIMINATION_GRACE_MS = 1000;
 export const DANGER_HIGH_ALERT_MS =
   DANGER_LOSS_DELAY_MS - DANGER_ELIMINATION_GRACE_MS;
-export const REWARD_SIGN_LIFETIME_MS = 1650;
-export const DEATH_SPARK_GRAVITY = 1.8;
+export const REWARD_SIGN_HOLD_MS = 100 * 20;
+export const REWARD_SIGN_FADE_MS = 200 * 20;
+export const REWARD_SIGN_LIFETIME_MS = REWARD_SIGN_HOLD_MS + REWARD_SIGN_FADE_MS;
+// SparkleManager stores velocity in grid-world units per simulation tick.
+// Browser particles use rows, and one row is two original world units.
+export const DEATH_SPARK_GRAVITY = 0.001 / 2;
+export const DEATH_SPARK_DRAG = 0.001;
 export const LEVEL_LIGHT_FADE_MS = 3000;
+export const LEVEL_LIGHT_IMPACT_FLASH_MS = 20 * 20;
 export const GARBAGE_ROW_REFORM_CHANCE = 0.5;
 export const GARBAGE_QUEUE_CAPACITY = 8;
 export const SWAP_DURATION_MS = 6 * 20;
+export const LOSE_BAR_FADE_TICKS = 20;
 // The original simulation consumes every elapsed 20 ms tick. Rendering may
 // skip frames, but gameplay time is never discarded when a frame is late.
 const SIMULATION_STEP_MS = 20;
@@ -73,6 +82,7 @@ export interface BlockCell extends Motion {
   clearStarted?: number;
   clearUntil?: number;
   deathSparkCount?: number;
+  deathSpinAxis?: number;
   awakenRevealAt?: number;
   awakenReleaseAt?: number;
   awakenSource?: GarbageFlavor;
@@ -86,7 +96,9 @@ export interface GarbageCell extends Motion {
   kind: "garbage";
   groupId: number;
   flavor: GarbageFlavor;
-  texture: number;
+  texture: number | null;
+  decalX?: number;
+  decalY?: number;
   state: "idle" | "shattering" | "awakening";
   clearStarted?: number;
   clearUntil?: number;
@@ -99,6 +111,7 @@ export interface GarbageCell extends Motion {
   awakenSequence?: number;
   comboId?: number;
   initialFallUntil?: number;
+  initialImpactAt?: number;
 }
 
 export type Cell = BlockCell | GarbageCell;
@@ -123,12 +136,28 @@ export interface RewardSign {
   id: number;
   kind: "magnitude" | "multiplier";
   value: number;
+  gridX: number;
+  gridY: number;
   x: number;
   y: number;
   jitterX: number;
   jitterY: number;
   startedAt: number;
   until: number;
+}
+
+export type LoseBarPhase =
+  | "inactive"
+  | "low"
+  | "high"
+  | "fade-low"
+  | "fade-high"
+  | "reset-high";
+
+export interface LoseBarState {
+  phase: LoseBarPhase;
+  progress: number;
+  fade: number;
 }
 
 export type SparkleStyle =
@@ -152,6 +181,72 @@ export interface DeathSpark {
   size: number;
   startedAt: number;
   until: number;
+}
+
+export interface DeathSparkVisual {
+  x: number;
+  y: number;
+  rotation: number;
+  alpha: number;
+  pulse: number;
+}
+
+export function deathSparkVisualAt(
+  spark: DeathSpark,
+  now: number,
+): DeathSparkVisual {
+  const ageTicks = Math.max(0, now - spark.startedAt) / SIMULATION_STEP_MS;
+  const remainingTicks = Math.max(0, spark.until - now) / SIMULATION_STEP_MS;
+  const dragFactor = 1 - DEATH_SPARK_DRAG;
+  const geometricDistance = DEATH_SPARK_DRAG > 0
+    ? (1 - dragFactor ** ageTicks) / DEATH_SPARK_DRAG
+    : ageTicks;
+  const terminalVelocity = DEATH_SPARK_DRAG > 0
+    ? DEATH_SPARK_GRAVITY / DEATH_SPARK_DRAG
+    : 0;
+  const alpha = remainingTicks < 15 ? remainingTicks / 15 : 1;
+  let pulse = 0;
+  if (remainingTicks >= 15 && remainingTicks < 21) {
+    pulse = (remainingTicks - 15) * 2 / 6;
+    if (pulse > 1) pulse = 2 - pulse;
+  }
+  return {
+    x: spark.x + spark.velocityX * geometricDistance,
+    y: spark.y
+      + (spark.velocityY + terminalVelocity) * geometricDistance
+      - terminalVelocity * ageTicks,
+    rotation: spark.rotation + spark.angularVelocity * ageTicks,
+    alpha,
+    pulse,
+  };
+}
+
+export interface RewardSignVisual {
+  alpha: number;
+  scale: number;
+  verticalMovementRows: number;
+}
+
+export function rewardSignVisualAt(
+  sign: RewardSign,
+  now: number,
+): RewardSignVisual {
+  const ageMs = Math.max(0, now - sign.startedAt);
+  const fade = ageMs <= REWARD_SIGN_HOLD_MS
+    ? 1
+    : Math.max(
+      0,
+      Math.min(1, (REWARD_SIGN_LIFETIME_MS - ageMs) / REWARD_SIGN_FADE_MS),
+    );
+  const expansion = 1 - fade;
+  const ageTicks = ageMs / SIMULATION_STEP_MS;
+  return {
+    alpha: fade ** 2,
+    scale: 1 + 4 * expansion ** 2,
+    verticalMovementRows: ageTicks <= 100
+      ? ageTicks * (ageTicks + 1) * 0.00001
+      : 0.101 + (ageTicks - 100) * 0.002,
+  };
 }
 
 export interface RewardMote {
@@ -458,7 +553,9 @@ export interface GameSnapshot {
   chainDepth: number;
   topOccupiedRow: number;
   levelLightBlends: number[];
+  levelLightImpactFlashes: number[];
   dangerMs: number;
+  loseBar: LoseBarState;
   incomingCount: number;
   nextIncomingMs: number | null;
   countdown: "1" | "2" | "3" | "GO!" | null;
@@ -700,7 +797,6 @@ export class CrackAttackEngine {
   private rise = 0;
   private impactSpringY = 0;
   private impactSpringVelocity = 0;
-  private pendingGarbageImpactArea = 0;
   private cursorX = 2;
   private cursorY = 4;
   private cursorFromX = 2;
@@ -717,6 +813,9 @@ export class CrackAttackEngine {
   private legacyComboId: number | null = null;
   private dangerMs = 0;
   private wasInDanger = false;
+  private loseBarPhase: LoseBarPhase = "inactive";
+  private loseBarProgress = 0;
+  private loseBarFadeTicks = 0;
   private raiseHeld = false;
   private raiseToRowBoundary = false;
   private queuedAttacks: QueuedAttack[] = [];
@@ -737,6 +836,7 @@ export class CrackAttackEngine {
     { length: VISIBLE_ROWS },
     () => ({ from: 0, to: 0, startedAt: 0, duration: 0 }),
   );
+  private levelLightImpactUntil = Array.from({ length: VISIBLE_ROWS }, () => 0);
 
   constructor(options: { seed?: number; attackSink?: AttackSink } = {}) {
     this.randomState = (options.seed ?? Date.now()) >>> 0 || 0x6d2b79f5;
@@ -767,7 +867,6 @@ export class CrackAttackEngine {
     this.rise = 0;
     this.impactSpringY = 0;
     this.impactSpringVelocity = 0;
-    this.pendingGarbageImpactArea = 0;
     this.cursorX = 2;
     this.cursorY = 4;
     this.cursorFromX = 2;
@@ -784,6 +883,9 @@ export class CrackAttackEngine {
     this.legacyComboId = null;
     this.dangerMs = 0;
     this.wasInDanger = false;
+    this.loseBarPhase = "inactive";
+    this.loseBarProgress = 0;
+    this.loseBarFadeTicks = 0;
     this.raiseHeld = false;
     this.raiseToRowBoundary = false;
     this.queuedAttacks = [];
@@ -800,6 +902,7 @@ export class CrackAttackEngine {
       { length: VISIBLE_ROWS },
       () => ({ from: 0, to: 0, startedAt: 0, duration: 0 }),
     );
+    this.levelLightImpactUntil = Array.from({ length: VISIBLE_ROWS }, () => 0);
     this.generateInitialStack();
     this.nextRow = this.generateCreepRow();
   }
@@ -808,7 +911,20 @@ export class CrackAttackEngine {
     if (this.status !== "ready" && this.status !== "gameover") return false;
     if (this.status === "gameover") {
       if (now - this.gameOverAt < GAME_OVER_RESTART_DELAY_MS) return false;
+      const priorLoseBarPhase = this.loseBarPhase;
+      const priorLoseBarProgress = this.loseBarProgress;
       this.reset(resetSeed);
+      // LoseBar::gameStart keeps the completed game's alert colors through
+      // the opening countdown, then fades them over the first 20 play ticks.
+      if (priorLoseBarPhase === "high") {
+        this.loseBarPhase = "fade-high";
+        this.loseBarProgress = priorLoseBarProgress;
+        this.loseBarFadeTicks = LOSE_BAR_FADE_TICKS;
+      } else if (priorLoseBarPhase === "low") {
+        this.loseBarPhase = "fade-low";
+        this.loseBarProgress = priorLoseBarProgress;
+        this.loseBarFadeTicks = LOSE_BAR_FADE_TICKS;
+      }
     } else if (resetSeed !== undefined) {
       // The ready screen already owns an initial board so deterministic engine
       // tests can inspect it. A real run may still provide a fresh wall-clock
@@ -870,12 +986,14 @@ export class CrackAttackEngine {
     // for an unrelated breaking animation to finish.
     this.finishBackgroundSwap(now);
     this.finishBackgroundFall(now);
+    this.finishDueGarbageFalls(now);
     this.finishDueClears(now);
     this.advancePhase(now);
     this.finishDueClears(now);
     this.announceAwakeningReveals(now);
     this.releaseDueAwakening(now);
     this.refreshPhase(now);
+    this.finishDueGarbageImpacts(now);
     if (this.status !== "playing") {
       this.stepDisplayedScore();
       this.stepImpactSpring();
@@ -891,22 +1009,31 @@ export class CrackAttackEngine {
     // GC_LOSS_DELAY_ELIMINATION while any blocks are dying or awakening. Our
     // timer counts upward, so the equivalent operation is a clamp to the
     // purple/red boundary, preserving a full second when play resumes.
-    if (inDanger && eliminationActive && this.dangerMs > DANGER_HIGH_ALERT_MS) {
+    const resetHighAlert = inDanger
+      && eliminationActive
+      && this.dangerMs > DANGER_HIGH_ALERT_MS;
+    if (resetHighAlert) {
       this.dangerMs = DANGER_HIGH_ALERT_MS;
+      if (this.loseBarPhase === "high") {
+        this.loseBarPhase = "reset-high";
+        this.loseBarFadeTicks = LOSE_BAR_FADE_TICKS;
+      }
     }
 
     if (inDanger && !eliminationActive) {
       this.dangerMs += delta;
       if (!this.wasInDanger) this.events.push({ type: "danger" });
-      if (this.dangerMs >= DANGER_LOSS_DELAY_MS) {
-        this.finishGame(now);
-        this.stepImpactSpring();
-        return;
-      }
     } else if (!inDanger) {
       this.dangerMs = 0;
     }
     this.wasInDanger = inDanger;
+    this.stepLoseBar(inDanger);
+
+    if (this.dangerMs >= DANGER_LOSS_DELAY_MS) {
+      this.finishGame(now);
+      this.stepImpactSpring();
+      return;
+    }
 
     // Creep::timeStep only returns early for a safe-height violation or while
     // blocks are dying/awakening. Swaps, ordinary falls, and garbage drops all
@@ -940,18 +1067,19 @@ export class CrackAttackEngine {
       }
     }
 
-    // The original updates Creep before GarbageGenerator on each tick.
-    if (this.phase === "idle" && this.awakeningCount() === 0) {
-      const dueIndex = this.queuedAttacks.findIndex((attack) => attack.dropAt <= now);
-      if (dueIndex >= 0) {
-        const [attack] = this.queuedAttacks.splice(dueIndex, 1);
-        if (!this.dropGarbage(attack, now)) {
-          // GarbageGenerator retries on the tick after its 300-tick alarm.
-          attack.dropAt = now + (300 + 1) * SIMULATION_STEP_MS;
-          this.queuedAttacks.push(attack);
-          this.sortAttackQueue();
-        }
+    // GarbageGenerator follows Creep and checks every active queue slot on
+    // every play tick. Its pieces fall independently of swaps, eliminations,
+    // awakening garbage, and other incoming pieces.
+    const dueAttacks = this.queuedAttacks.filter((attack) => attack.dropAt <= now);
+    if (dueAttacks.length > 0) {
+      this.queuedAttacks = this.queuedAttacks.filter((attack) => attack.dropAt > now);
+      for (const attack of dueAttacks) {
+        if (this.dropGarbage(attack, now)) continue;
+        // GarbageGenerator retries on the tick after its 300-tick alarm.
+        attack.dropAt = now + (300 + 1) * SIMULATION_STEP_MS;
+        this.queuedAttacks.push(attack);
       }
+      this.sortAttackQueue();
     }
 
     this.stepDisplayedScore();
@@ -1158,7 +1286,15 @@ export class CrackAttackEngine {
       levelLightBlends: this.levelLights.map((_, index) => (
         this.levelLightBlendAt(index, visualNow)
       )),
+      levelLightImpactFlashes: this.levelLightImpactUntil.map((_, index) => (
+        this.levelLightImpactFlashAt(index, visualNow)
+      )),
       dangerMs: this.dangerMs,
+      loseBar: {
+        phase: this.loseBarPhase,
+        progress: this.loseBarProgress,
+        fade: this.loseBarFadeTicks / LOSE_BAR_FADE_TICKS,
+      },
       incomingCount: this.queuedAttacks.length,
       nextIncomingMs: this.queuedAttacks.length
         ? Math.max(0, this.queuedAttacks[0].dropAt - visualNow)
@@ -1194,7 +1330,7 @@ export class CrackAttackEngine {
       } else if (completedPhase === "falling") {
         this.afterFall(now);
       } else if (completedPhase === "garbage") {
-        this.finishGarbage(now);
+        this.finishDueGarbageFalls(now);
       }
       this.refreshPhase(now);
     }
@@ -1222,9 +1358,24 @@ export class CrackAttackEngine {
     this.refreshPhase(now);
   }
 
-  private finishGarbage(now: number): void {
-    this.notifyGarbageImpact();
-    const fallDuration = this.applyGravity(now);
+  private finishDueGarbageFalls(now: number): void {
+    const landedGroups = this.collectGarbageGroups()
+      .filter((group) => group.positions.some(({ cell }) => (
+        cell.initialFallUntil !== undefined && cell.initialFallUntil <= now
+      )))
+      .sort((left, right) => left.minY - right.minY);
+    if (landedGroups.length === 0) return;
+
+    for (const group of landedGroups) {
+      for (const { cell } of group.positions) {
+        cell.initialFallUntil = undefined;
+        // If its support disappeared during the fall, applyGravity replaces
+        // this provisional impact with the later, retargeted landing time.
+        cell.initialImpactAt = now;
+      }
+    }
+
+    const fallDuration = this.applyGravity(now, true);
     const pendingMotionUntil = Math.max(
       this.backgroundSwapUntil,
       this.backgroundFallUntil,
@@ -1242,9 +1393,30 @@ export class CrackAttackEngine {
     this.refreshPhase(now);
   }
 
-  private notifyGarbageImpact(): void {
-    const area = this.pendingGarbageImpactArea;
-    this.pendingGarbageImpactArea = 0;
+  private finishDueGarbageImpacts(now: number): void {
+    const landedGroups = this.collectGarbageGroups()
+      .filter((group) => group.positions.some(({ cell }) => (
+        cell.initialImpactAt !== undefined && cell.initialImpactAt <= now
+      )))
+      .sort((left, right) => left.minY - right.minY);
+    for (const group of landedGroups) {
+      const rows = new Set(group.positions.map(({ y }) => y));
+      for (const { cell } of group.positions) cell.initialImpactAt = undefined;
+      this.notifyGarbageImpact(
+        group.positions.length,
+        Math.min(...rows),
+        rows.size,
+        now,
+      );
+    }
+  }
+
+  private notifyGarbageImpact(
+    area: number,
+    landingY: number,
+    height: number,
+    now: number,
+  ): void {
     if (area <= 0) return;
 
     // Exact Spring::notifyImpact behavior from Crack Attack 1.1.15-cvs.
@@ -1254,6 +1426,9 @@ export class CrackAttackEngine {
       * area
       * IMPACT_GARBAGE_DENSITY;
     if (deltaVelocity > 0) this.impactSpringVelocity -= deltaVelocity;
+    for (let row = landingY; row < landingY + height && row < VISIBLE_ROWS; row += 1) {
+      if (row >= 0) this.startLevelLightImpact(row, now);
+    }
     this.events.push({ type: "garbage-impact", area });
   }
 
@@ -1262,6 +1437,62 @@ export class CrackAttackEngine {
     this.impactSpringY += this.impactSpringVelocity;
     this.impactSpringVelocity -= IMPACT_SPRING_STIFFNESS * this.impactSpringY
       + IMPACT_SPRING_DRAG * this.impactSpringVelocity;
+  }
+
+  private stepLoseBar(inDanger: boolean): void {
+    if (
+      this.loseBarPhase === "inactive"
+      || this.loseBarPhase === "fade-low"
+      || this.loseBarPhase === "fade-high"
+    ) {
+      if (this.loseBarPhase !== "inactive") {
+        this.loseBarFadeTicks -= 1;
+        if (this.loseBarFadeTicks <= 0) {
+          this.loseBarPhase = "inactive";
+          this.loseBarFadeTicks = 0;
+        }
+      }
+      if (inDanger) {
+        this.loseBarPhase = "low";
+        this.loseBarFadeTicks = 0;
+      }
+    } else if (this.loseBarPhase === "low") {
+      if (!inDanger) {
+        this.loseBarPhase = "fade-low";
+        this.loseBarFadeTicks = LOSE_BAR_FADE_TICKS;
+      } else if (this.dangerMs >= DANGER_HIGH_ALERT_MS) {
+        this.loseBarPhase = "high";
+      }
+    } else if (this.loseBarPhase === "high") {
+      if (!inDanger) {
+        this.loseBarPhase = "fade-high";
+        this.loseBarFadeTicks = LOSE_BAR_FADE_TICKS;
+      }
+    } else if (this.loseBarPhase === "reset-high") {
+      this.loseBarFadeTicks -= 1;
+      if (this.loseBarFadeTicks <= 0) {
+        this.loseBarPhase = "high";
+        this.loseBarFadeTicks = 0;
+      }
+    }
+
+    if (this.loseBarPhase === "low") {
+      this.loseBarProgress = Math.max(
+        0,
+        Math.min(1, this.dangerMs / DANGER_HIGH_ALERT_MS),
+      );
+    } else if (this.loseBarPhase === "high") {
+      this.loseBarProgress = Math.max(
+        0,
+        Math.min(
+          1,
+          (this.dangerMs - DANGER_HIGH_ALERT_MS)
+            / (DANGER_LOSS_DELAY_MS - DANGER_HIGH_ALERT_MS),
+        ),
+      );
+    } else if (this.loseBarPhase === "inactive") {
+      this.loseBarProgress = 0;
+    }
   }
 
   private afterSwap(now: number): void {
@@ -1346,7 +1577,7 @@ export class CrackAttackEngine {
       effectivePatterns.forEach((pattern, index) => {
         const depth = previousDepth + index + 1;
         this.events.push({ type: "chain", depth });
-        this.createRewardSign("multiplier", depth, pattern.anchor, now, index);
+        this.createRewardSign("multiplier", depth, pattern.anchor, now);
         // ComboTabulator creates every multiplier mote without sibling delay.
         this.createRewardMote("multiplier", pattern.anchor, depth, now, 0);
       });
@@ -1364,6 +1595,7 @@ export class CrackAttackEngine {
       cell.clearStarted = now;
       cell.clearUntil = clearUntil;
       cell.comboId = combo.id;
+      cell.deathSpinAxis = this.random() * Math.PI * 2;
       if (cell.flavor === GRAY_FLAVOR) grayMagnitude += 1;
       else normalMagnitude += 1;
 
@@ -1400,7 +1632,7 @@ export class CrackAttackEngine {
     this.lastGain = gain;
 
     const totalMagnitude = normalMagnitude + grayMagnitude;
-    const deathSparkCount = Math.min(18, totalMagnitude + combo.multiplier - 1);
+    const deathSparkCount = totalMagnitude + combo.multiplier - 1;
     for (const { x, y } of matches) {
       const cell = this.board[y]?.[x] ?? null;
       if (cell?.kind === "block" && cell.state === "clearing") {
@@ -1417,7 +1649,7 @@ export class CrackAttackEngine {
     // GarbageGenerator creates the sign before queueing garbage and its mote.
     // That order matters because all three consume the shared random stream.
     if (totalMagnitude > 3) {
-      this.createRewardSign("magnitude", totalMagnitude, signAnchor, now, multiplierIncrements);
+      this.createRewardSign("magnitude", totalMagnitude, signAnchor, now);
     }
     let moteSibling = combo.multiplier > 1 ? 1 : 0;
     for (const attack of magnitudeAttacks(normalMagnitude, now)) {
@@ -1704,6 +1936,9 @@ export class CrackAttackEngine {
       if (cell.kind === "garbage" && cell.initialFallUntil !== undefined) {
         cell.initialFallUntil += duration;
       }
+      if (cell.kind === "garbage" && cell.initialImpactAt !== undefined) {
+        cell.initialImpactAt += duration;
+      }
     };
 
     for (const row of this.board) for (const cell of row) shiftCell(cell);
@@ -1733,6 +1968,9 @@ export class CrackAttackEngine {
     for (const light of this.levelLights) {
       if (light.duration > 0) light.startedAt += duration;
     }
+    this.levelLightImpactUntil = this.levelLightImpactUntil.map((until) => (
+      until > 0 ? until + duration : 0
+    ));
   }
 
   private createCombo(
@@ -1928,10 +2166,16 @@ export class CrackAttackEngine {
   }
 
   private refreshPhase(now: number): void {
-    // Foreground swaps and garbage reveals own their completion callback. Keep
-    // them foregrounded even if another clear deadline lands on the same tick;
-    // advancePhase resets the phase before running that callback.
-    if (this.phase === "swapping" || this.phase === "garbage") return;
+    // A foreground swap owns its completion callback. Garbage landing clocks
+    // remain independent and are represented by the earliest active deadline.
+    if (this.phase === "swapping") return;
+
+    const garbageDeadline = this.nextGarbageLandingDeadline();
+    if (garbageDeadline !== null) {
+      this.phase = "garbage";
+      this.phaseUntil = garbageDeadline;
+      return;
+    }
 
     const clearDeadline = this.nextClearDeadline();
     if (clearDeadline !== null) {
@@ -1963,6 +2207,12 @@ export class CrackAttackEngine {
       for (const group of groups) {
         const positions = group.positions;
         if (positions.some(({ cell }) => cell.state !== "idle")) continue;
+        if (positions.some(({ cell }) => (
+          cell.initialFallUntil !== undefined && cell.initialFallUntil > now
+        ))) continue;
+        const pendingInitialImpact = positions.some(({ cell }) => (
+          cell.initialImpactAt !== undefined
+        ));
         for (const position of positions) this.board[position.y][position.x] = null;
 
         let drop = BUFFER_ROWS;
@@ -1975,22 +2225,31 @@ export class CrackAttackEngine {
           drop = Math.min(drop, available);
         }
 
+        let groupFallDuration = 0;
         for (const position of positions) {
           const targetY = position.y - drop;
           this.board[targetY][position.x] = position.cell;
-          if (drop > 0) longestFall = Math.max(
-            longestFall,
-            this.startFallMotion(
-              position.cell,
-              position.x,
-              position.y,
-              targetY,
-              now,
-              noHang,
-            ),
-          );
+          if (drop > 0) {
+            groupFallDuration = Math.max(
+              groupFallDuration,
+              this.startFallMotion(
+                position.cell,
+                position.x,
+                position.y,
+                targetY,
+                now,
+                noHang,
+              ),
+            );
+          }
         }
         if (drop > 0) {
+          if (pendingInitialImpact) {
+            for (const position of positions) {
+              position.cell.initialImpactAt = now + groupFallDuration;
+            }
+          }
+          longestFall = Math.max(longestFall, groupFallDuration);
           changed = true;
         }
       }
@@ -2040,6 +2299,16 @@ export class CrackAttackEngine {
     }));
   }
 
+  private nextGarbageLandingDeadline(): number | null {
+    let deadline: number | null = null;
+    for (const group of this.collectGarbageGroups()) {
+      const groupDeadline = group.positions[0]?.cell.initialFallUntil;
+      if (groupDeadline === undefined) continue;
+      deadline = deadline === null ? groupDeadline : Math.min(deadline, groupDeadline);
+    }
+    return deadline;
+  }
+
   private markShatteringGarbage(
     direct: Set<number>,
     clearStarted: number,
@@ -2061,7 +2330,8 @@ export class CrackAttackEngine {
     while (queue.length) {
       const currentId = queue.shift() as number;
       const current = groupById.get(currentId);
-      if (!current || current.positions[0].cell.flavor === "gray") continue;
+      if (!current) continue;
+      const currentFlavor = current.positions[0].cell.flavor;
       const occupied = new Set(
         current.positions.map((position) => coordinateKey(position.x, position.y)),
       );
@@ -2070,7 +2340,9 @@ export class CrackAttackEngine {
         if (candidate.positions.some(({ cell }) => (
           cell.state !== "idle" || this.cellIsMoving(cell, clearStarted)
         ))) continue;
-        if (candidate.positions[0].cell.flavor === "gray") continue;
+        // Gray shatters through touching gray garbage, while normal and gray
+        // never cross-propagate. A direct elimination may seed either flavor.
+        if (candidate.positions[0].cell.flavor !== currentFlavor) continue;
         const touching = candidate.positions.some(({ x, y }) =>
           [
             coordinateKey(x - 1, y),
@@ -2162,6 +2434,27 @@ export class CrackAttackEngine {
   private dropGarbage(attack: QueuedAttack, now: number): boolean {
     const width = Math.max(1, Math.min(BOARD_COLUMNS, attack.width));
     const height = Math.max(1, Math.min(11, attack.height));
+
+    // GarbageManager stages pieces above the current effective ceiling. Use
+    // each falling group's present interpolated row so several due pieces can
+    // enter and descend together instead of retaining their original ceiling.
+    let occupiedCeiling = -1;
+    for (let y = 0; y < this.board.length; y += 1) {
+      for (let column = 0; column < BOARD_COLUMNS; column += 1) {
+        const cell = this.board[y][column];
+        if (!cell) continue;
+        const currentY = cell.kind === "garbage"
+          && cell.initialFallUntil !== undefined
+          && now < cell.initialFallUntil
+          ? this.motionYAt(cell, y, now)
+          : y;
+        occupiedCeiling = Math.max(occupiedCeiling, currentY);
+      }
+    }
+    const sourceBottomY = Math.max(VISIBLE_ROWS + 1, Math.floor(occupiedCeiling) + 1);
+    // The original leaves its final grid row empty for the last possible creep.
+    if (sourceBottomY + height > BUFFER_ROWS - 1) return false;
+
     const x = width === BOARD_COLUMNS
       ? 0
       : Math.floor(this.random() * (BOARD_COLUMNS - width + 1));
@@ -2176,31 +2469,26 @@ export class CrackAttackEngine {
       }
       landingY = Math.max(landingY, columnTop + 1);
     }
-    if (landingY + height >= BUFFER_ROWS) return false;
-
-    // GarbageManager stages incoming pieces one row above the safe-height
-    // boundary (or above anything already falling there), then applies the
-    // same three-tick hang and three-ticks-per-row gravity as normal pieces.
-    let occupiedCeiling = -1;
-    for (let y = 0; y < this.board.length; y += 1) {
-      for (let column = 0; column < BOARD_COLUMNS; column += 1) {
-        const cell = this.board[y][column];
-        if (!cell) continue;
-        const visualSource = cell.kind === "garbage"
-          && cell.initialFallUntil !== undefined
-          && now < cell.initialFallUntil
-          ? cell.animationFromY ?? y
-          : y;
-        occupiedCeiling = Math.max(occupiedCeiling, visualSource);
-      }
-    }
-    const sourceBottomY = Math.max(VISIBLE_ROWS + 1, Math.floor(occupiedCeiling) + 1);
     const fallDuration = FALL_HANG_MS
       + Math.max(0, sourceBottomY - landingY) * FALL_ROW_MS;
     const initialFallUntil = now + fallDuration;
 
     const groupId = this.nextGroupId++;
-    const texture = Math.floor(this.random() * 6);
+    let texture: number | null = null;
+    let decalX: number | undefined;
+    let decalY: number | undefined;
+    if (
+      height >= 4
+      && width >= 4
+      && !this.garbageFlavorImageActive()
+      && Math.floor(this.random() * 8) !== 0
+    ) {
+      decalX = 1 + Math.floor(this.random() * (width - 3));
+      decalY = Math.floor(this.random() * 4) !== 0
+        ? 1
+        : 1 + Math.floor(this.random() * (height - 3));
+      texture = Math.floor(this.random() * 4);
+    }
     for (let row = 0; row < height; row += 1) {
       for (let column = 0; column < width; column += 1) {
         const cell: GarbageCell = {
@@ -2209,6 +2497,8 @@ export class CrackAttackEngine {
           groupId,
           flavor: attack.flavor,
           texture,
+          decalX,
+          decalY,
           state: "idle",
           animationFromX: x + column,
           animationFromY: sourceBottomY + row,
@@ -2220,11 +2510,15 @@ export class CrackAttackEngine {
         this.board[landingY + row][x + column] = cell;
       }
     }
-    this.phase = "garbage";
-    this.phaseUntil = initialFallUntil;
-    this.pendingGarbageImpactArea = width * height;
+    this.refreshPhase(now);
     this.events.push({ type: "garbage" });
     return true;
+  }
+
+  private garbageFlavorImageActive(): boolean {
+    return this.board.some((row) => row.some((cell) => (
+      cell?.kind === "garbage" && cell.texture !== null
+    )));
   }
 
   private emitAttack(attack: AttackPayload): void {
@@ -2541,6 +2835,31 @@ export class CrackAttackEngine {
     return light.from + (light.to - light.from) * progress;
   }
 
+  private startLevelLightImpact(index: number, now: number): void {
+    const remainingTicks = Math.max(
+      0,
+      Math.ceil((this.levelLightImpactUntil[index] - now) / SIMULATION_STEP_MS),
+    );
+    let flashTicks = 20;
+    if (remainingTicks > 0) {
+      flashTicks = remainingTicks;
+      if (remainingTicks < 18) {
+        flashTicks = 18 + Math.floor(2 * (1 - remainingTicks / 18));
+      }
+    }
+    this.levelLightImpactUntil[index] = now + flashTicks * SIMULATION_STEP_MS;
+  }
+
+  private levelLightImpactFlashAt(index: number, now: number): number {
+    const remaining = (this.levelLightImpactUntil[index] - now)
+      / LEVEL_LIGHT_IMPACT_FLASH_MS;
+    if (remaining <= 0) return 0;
+    const linear = remaining > 0.9
+      ? (1 - remaining) / 0.1
+      : remaining / 0.9;
+    return Math.max(0, Math.min(1, linear)) ** 2;
+  }
+
   private syncLevelLights(now: number): void {
     const topRow = this.topOccupiedRow(now);
     for (let level = 0; level < VISIBLE_ROWS; level += 1) {
@@ -2576,18 +2895,43 @@ export class CrackAttackEngine {
     value: number,
     anchor: Coordinate,
     now: number,
-    sibling: number,
   ): void {
+    if (this.rewardSigns.length >= 25) return;
     const multiplier = kind === "multiplier";
+    let gridX = anchor.x + (multiplier ? 1 : 0);
+    // SignManager uses the desktop grid's y coordinate, where row zero is the
+    // hidden creep row represented separately by `nextRow` in this port.
+    let gridY = anchor.y + 1 - (multiplier ? 1 : 0);
+    const locationAvailable = (): boolean => (
+      gridY > 0
+      && gridX > 0
+      && gridX < BOARD_COLUMNS
+      && !this.rewardSigns.some((sign) => sign.gridX === gridX && sign.gridY === gridY)
+    );
+    if (!locationAvailable()) {
+      if (multiplier) {
+        if (gridX > 1) gridX -= 1;
+        else gridY += 1;
+      } else if (gridX < BOARD_COLUMNS - 1) {
+        gridX += 1;
+      } else {
+        gridY += 1;
+      }
+    }
+    while (!locationAvailable()) gridY += 1;
+
     this.rewardSigns.push({
       id: this.nextEffectId++,
       kind,
       value: Math.max(multiplier ? 2 : 4, Math.min(12, value)),
-      x: Math.max(0, Math.min(BOARD_COLUMNS - 1, anchor.x + (multiplier ? 1 : 0))),
-      y: Math.max(0, anchor.y - (multiplier ? 1 : 0) + sibling * 0.18)
-        + this.rise,
-      jitterX: (this.random() - 0.5) * 10,
-      jitterY: (this.random() - 0.5) * 10,
+      gridX,
+      gridY,
+      // The desktop offsets signs half a cell left and half a cell above the
+      // selected grid point, with a +/-0.1-cell random spread (6.2 px here).
+      x: gridX - 0.5,
+      y: gridY - 0.5 + this.rise,
+      jitterX: (this.random() - 0.5) * 12.4,
+      jitterY: (this.random() - 0.5) * 12.4,
       startedAt: now,
       until: now + REWARD_SIGN_LIFETIME_MS,
     });
@@ -2601,16 +2945,23 @@ export class CrackAttackEngine {
     now: number,
   ): void {
     for (let index = 0; index < count && this.deathSparks.length < 400; index += 1) {
+      const speed = 0.01 + (this.random() + this.random()) * 0.0325;
       const angle = Math.PI / 4 + this.random() * Math.PI / 2;
-      const speed = 0.55 + ((this.random() + this.random()) / 2) * 4;
-      const baseLife = 900 + ((this.random() + this.random()) / 2) * 1700;
-      const longLife = this.random() < 1 / 40 ? 2200 + this.random() * 3400 : baseLife;
+      const rotation = Math.floor(this.random() * 360) * Math.PI / 180;
+      let angularVelocity = (
+        1 + (this.random() + this.random()) * 7
+      ) * Math.PI / 180;
+      if (this.random() < 0.5) angularVelocity = -angularVelocity;
       const sizeRoll = Math.floor(this.random() * 4);
       const size = sizeRoll === 0
         ? 0.4
         : sizeRoll === 1
           ? 0.4 + this.random() * 0.6
           : 1;
+      const longLife = this.random() < 1 / 40;
+      const lifeTicks = longLife
+        ? Math.floor(this.random() * 500) + Math.floor(this.random() * 500) + 700
+        : Math.floor(this.random() * 50) + Math.floor(this.random() * 50) + 70;
       this.deathSparks.push({
         id: this.nextEffectId++,
         flavor,
@@ -2618,11 +2969,11 @@ export class CrackAttackEngine {
         y: y + 0.5 + this.rise,
         velocityX: Math.cos(angle) * speed,
         velocityY: Math.sin(angle) * speed,
-        rotation: this.random() * Math.PI * 2,
-        angularVelocity: (this.random() < 0.5 ? -1 : 1) * (3 + this.random() * 14),
+        rotation,
+        angularVelocity,
         size,
         startedAt: now,
-        until: now + longLife,
+        until: now + lifeTicks * SIMULATION_STEP_MS,
       });
     }
   }

@@ -553,7 +553,23 @@ export default function CrackAttackGame() {
         metaKey: event.metaKey,
         restartReady: current.gameOverElapsedMs >= GAME_OVER_RESTART_DELAY_MS,
       });
-      if (!action) return;
+      if (!action) {
+        const key = event.key.toLowerCase();
+        const repeatedMovement = event.repeat
+          && (current.status === "playing" || current.status === "countdown")
+          && [
+            "arrowleft",
+            "arrowright",
+            "arrowup",
+            "arrowdown",
+            "a",
+            "d",
+            "w",
+            "s",
+          ].includes(key);
+        if (repeatedMovement) event.preventDefault();
+        return;
+      }
       event.preventDefault();
 
       if (action === "start" || action === "restart") startRun();

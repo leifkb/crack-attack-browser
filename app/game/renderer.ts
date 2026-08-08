@@ -9,18 +9,17 @@ import {
   AWAKEN_INTERNAL_DELAY_MS,
   AWAKEN_POP_DURATION_MS,
   BOARD_COLUMNS,
-  DEATH_SPARK_GRAVITY,
-  DANGER_HIGH_ALERT_MS,
-  DANGER_LOSS_DELAY_MS,
   REWARD_MOTE_PALETTE,
-  REWARD_SIGN_LIFETIME_MS,
   VISIBLE_ROWS,
+  deathSparkVisualAt,
   rewardMoteVisualAt,
+  rewardSignVisualAt,
   type BlockCell,
   type Cell,
   type DeathSpark,
   type GameSnapshot,
   type GarbageCell,
+  type LoseBarState,
   type RewardMote,
   type RewardSign,
   type SparkleStyle,
@@ -44,6 +43,7 @@ import {
   levelLightScreenY,
   loseBarToneAt,
   loseBarVisual,
+  playfieldVisible,
   retainedGarbageVisual,
   type Color3,
   type GarbageMesh,
@@ -747,12 +747,12 @@ function drawCenteredUiText(
   drawUiText(context, assets, text, centerX - measureUiText(text, height) / 2, y, height);
 }
 
-function drawLoseBar(context: CanvasRenderingContext2D, dangerMs: number): void {
+function drawLoseBar(context: CanvasRenderingContext2D, state: LoseBarState): void {
   const x = 74;
   const y = 526;
   const width = 216;
   const height = 22;
-  const visual = loseBarVisual(dangerMs, DANGER_LOSS_DELAY_MS, DANGER_HIGH_ALERT_MS);
+  const visual = loseBarVisual(state);
 
   context.save();
   roundedRect(context, x, y, width, height, height / 2);
@@ -798,7 +798,7 @@ function drawHud(
   snapshot: GameSnapshot,
   assets: RenderAssets,
 ): void {
-  drawLoseBar(context, snapshot.dangerMs);
+  drawLoseBar(context, snapshot.loseBar);
   const hudCenterX = 182;
   const score = formatSoloScore(snapshot.displayScore);
   const scoreSize = 44;
@@ -853,11 +853,16 @@ function drawLevelTriangle(
 }
 
 function drawLevelLights(context: CanvasRenderingContext2D, snapshot: GameSnapshot): void {
-  const flashing = snapshot.dangerMs > 0;
   for (let index = 0; index < VISIBLE_ROWS; index += 1) {
     const level = VISIBLE_ROWS - 1 - index;
     const y = levelLightScreenY(level, BOARD_BOTTOM, CELL_SIZE);
-    const color = levelLightColor(snapshot.levelLightBlends[level] ?? 0, snapshot.dangerMs);
+    const impactFlash = snapshot.levelLightImpactFlashes[level] ?? 0;
+    const color = levelLightColor(
+      snapshot.levelLightBlends[level] ?? 0,
+      snapshot.dangerMs,
+      impactFlash,
+    );
+    const flashing = snapshot.dangerMs > 0 || impactFlash > 0;
     drawLevelTriangle(context, 18, y, 1, color, flashing);
     drawLevelTriangle(context, 782, y, -1, color, flashing);
   }
@@ -1085,7 +1090,8 @@ function blockVisual(cell: BlockCell, now: number, dimmed: boolean): BlockVisual
       color = mixColor(color, [1, 1, 1], flash);
     } else {
       const tumble = (progress - DYING_FLASH_FRACTION) / (1 - DYING_FLASH_FRACTION);
-      const axisAngle = ((cell.id * 0.754877666) % 1) * Math.PI * 2;
+      const axisAngle = cell.deathSpinAxis
+        ?? ((cell.id * 0.754877666) % 1) * Math.PI * 2;
       spinAxis = [Math.cos(axisAngle), Math.sin(axisAngle), 0];
       spinAngle = DYING_ROTATIONS * tumble * tumble;
       scale = 1 - 0.9 * tumble;
@@ -1476,7 +1482,9 @@ function renderWebGLBlocks(
 interface GarbageGroupRender {
   groupId: number;
   flavor: "normal" | "gray";
-  texture: number;
+  texture: number | null;
+  decalX?: number;
+  decalY?: number;
   state: GarbageCell["state"];
   clearStarted?: number;
   clearUntil?: number;
@@ -1557,6 +1565,8 @@ function collectGarbage(snapshot: GameSnapshot): GarbageGroupRender[] {
         groupId: cell.groupId,
         flavor: cell.flavor,
         texture: cell.texture,
+        decalX: cell.decalX,
+        decalY: cell.decalY,
         state: cell.state,
         clearStarted: cell.clearStarted,
         clearUntil: cell.clearUntil,
@@ -1761,8 +1771,12 @@ function drawGarbage(
     context.stroke();
   }
 
-  const texture = assets.garbage[group.texture];
-  if (group.flavor === "normal" && imageReady(texture) && widthCells > 1) {
+  const texture = group.texture === null ? null : assets.garbage[group.texture];
+  if (
+    group.decalX !== undefined
+    && group.decalY !== undefined
+    && imageReady(texture)
+  ) {
     const frontRing = mesh.frontRing.map((point) => [
       point[0] + worldCenter[0],
       point[1] + worldCenter[1],
@@ -1790,35 +1804,35 @@ function drawGarbage(
     });
     context.closePath();
     context.clip();
-    const innerWidth = (widthCells - 0.205) * 2;
-    const innerHeight = (heightCells - 0.205) * 2;
-    const imageWorldSize = Math.min(innerHeight * 0.78, innerWidth * 0.28, 2.7);
+    const imageWorldSize = 4;
+    const imageCenterX = worldCenter[0] + 2 * group.decalX + 2 - widthCells;
+    const imageCenterY = worldCenter[1] + 2 * group.decalY + 2 - heightCells;
     const frontZ = worldCenter[2] + mesh.frontDepth + 0.002;
     const [imageLeft] = projectWorldPoint(
-      [worldCenter[0] - imageWorldSize / 2, worldCenter[1], frontZ],
+      [imageCenterX - imageWorldSize / 2, imageCenterY, frontZ],
       VIEW_CENTER_X,
       VIEW_CENTER_Y,
       WORLD_UNITS_PER_PIXEL,
     );
     const [imageRight] = projectWorldPoint(
-      [worldCenter[0] + imageWorldSize / 2, worldCenter[1], frontZ],
+      [imageCenterX + imageWorldSize / 2, imageCenterY, frontZ],
       VIEW_CENTER_X,
       VIEW_CENTER_Y,
       WORLD_UNITS_PER_PIXEL,
     );
     const [, imageTop] = projectWorldPoint(
-      [worldCenter[0], worldCenter[1] + imageWorldSize / 2, frontZ],
+      [imageCenterX, imageCenterY + imageWorldSize / 2, frontZ],
       VIEW_CENTER_X,
       VIEW_CENTER_Y,
       WORLD_UNITS_PER_PIXEL,
     );
     const [, imageBottom] = projectWorldPoint(
-      [worldCenter[0], worldCenter[1] - imageWorldSize / 2, frontZ],
+      [imageCenterX, imageCenterY - imageWorldSize / 2, frontZ],
       VIEW_CENTER_X,
       VIEW_CENTER_Y,
       WORLD_UNITS_PER_PIXEL,
     );
-    context.globalAlpha = alpha * 0.86;
+    context.globalAlpha = alpha;
     context.drawImage(
       texture,
       imageLeft,
@@ -2068,33 +2082,21 @@ function drawDeathSparks(
   for (const spark of sparks) {
     const texture = sparkleTexture("four", BLOCK_COLORS[spark.flavor]);
     if (!texture) continue;
-    const duration = Math.max(1, spark.until - spark.startedAt);
-    const ageSeconds = Math.max(0, now - spark.startedAt) / 1000;
-    const remaining = clamp((spark.until - now) / duration);
-    const x = BOARD_X + (
-      spark.x + spark.velocityX * ageSeconds
-    ) * CELL_SIZE;
-    const yPosition = spark.y
-      + spark.velocityY * ageSeconds
-      - 0.5 * DEATH_SPARK_GRAVITY * ageSeconds ** 2;
-    const y = BOARD_BOTTOM - yPosition * CELL_SIZE;
-    const fade = remaining < 0.14 ? remaining / 0.14 : 1;
-    const pulse = remaining < 0.19 && remaining >= 0.14
-      ? Math.sin(((remaining - 0.14) / 0.05) * Math.PI)
-      : 0;
-    const size = 11 * spark.size;
-    const rotation = spark.rotation + spark.angularVelocity * ageSeconds;
-    const cosine = Math.cos(rotation);
-    const sine = Math.sin(rotation);
+    const visual = deathSparkVisualAt(spark, now);
+    const x = BOARD_X + visual.x * CELL_SIZE;
+    const y = BOARD_BOTTOM - visual.y * CELL_SIZE;
+    const size = CELL_SIZE * 0.2 * spark.size;
+    const cosine = Math.cos(visual.rotation);
+    const sine = Math.sin(visual.rotation);
 
     context.setTransform(cosine, sine, -sine, cosine, x, y);
-    context.globalAlpha = fade;
+    context.globalAlpha = visual.alpha;
     context.shadowColor = DEATH_SPARK_SHADOW_COLORS[spark.flavor];
     context.shadowBlur = detailedShadows ? 1.5 : 0;
     context.drawImage(texture, -size / 2, -size / 2, size, size);
 
-    if (whiteTexture && pulse > 0) {
-      context.globalAlpha = fade * pulse;
+    if (whiteTexture && visual.pulse > 0) {
+      context.globalAlpha = visual.alpha * visual.pulse;
       context.shadowBlur = 0;
       context.drawImage(whiteTexture, -size / 2, -size / 2, size, size);
     }
@@ -2138,23 +2140,17 @@ function drawRewardSign(
 ): void {
   const image = rewardSignImage(sign, assets);
   if (!imageReady(image)) return;
-  const progress = clamp((now - sign.startedAt) / REWARD_SIGN_LIFETIME_MS);
-  const holdFraction = 0.34;
-  const fade = progress <= holdFraction
-    ? 1
-    : (1 - progress) / (1 - holdFraction);
-  const expansion = 1 - fade;
-  const scale = 1 + 4 * expansion ** 2;
-  const baseHeight = 34;
+  const visual = rewardSignVisualAt(sign, now);
+  const baseHeight = CELL_SIZE * 0.66;
   const baseWidth = baseHeight * (image.naturalWidth / image.naturalHeight);
   const centerX = BOARD_X + (sign.x + 0.5) * CELL_SIZE + sign.jitterX;
   const centerY = BOARD_BOTTOM - (sign.y + 0.5) * CELL_SIZE
-    + sign.jitterY - 28 * expansion;
+    - sign.jitterY - visual.verticalMovementRows * CELL_SIZE;
 
   context.save();
-  context.globalAlpha = fade ** 2;
+  context.globalAlpha = visual.alpha;
   context.translate(centerX, centerY);
-  context.scale(scale, scale);
+  context.scale(visual.scale, visual.scale);
   context.drawImage(image, -baseWidth / 2, -baseHeight / 2, baseWidth, baseHeight);
   context.restore();
 }
@@ -2282,8 +2278,6 @@ function drawStatusArt(
   if (snapshot.status === "ready") {
     drawReadyScreen(context, snapshot, assets, highScore, useTouchPrompt);
   } else if (snapshot.status === "paused") {
-    context.fillStyle = "rgba(0, 0, 0, .45)";
-    context.fillRect(BOARD_X, BOARD_TOP, BOARD_WIDTH, BOARD_HEIGHT);
     drawCenteredAsset(context, assets.messagePaused, BOARD_WIDTH, BOARD_WIDTH / 4);
   } else if (snapshot.status === "gameover") {
     drawGameOverArt(context, snapshot, assets);
@@ -2316,117 +2310,30 @@ export function drawGame(
   if (snapshot.status !== "ready") {
     drawHud(target, snapshot, assets);
 
-    target.save();
-    target.beginPath();
-    target.rect(BOARD_X - 2, BOARD_TOP, BOARD_WIDTH + 4, BOARD_HEIGHT);
-    target.clip();
+    // Displayer::displayPlay omits the grid and swapper while paused, but keeps the
+    // external candy, transient effects, and pause message visible.
+    if (playfieldVisible(snapshot.status)) {
+      target.save();
+      target.beginPath();
+      target.rect(BOARD_X - 2, BOARD_TOP, BOARD_WIDTH + 4, BOARD_HEIGHT);
+      target.clip();
 
-    const garbageGroups = collectGarbage(snapshot);
-    const moteLights = rewardMotePointLights(snapshot, now);
-    const usedWebGL = drawWebGLBlocks(
-      target,
-      snapshot,
-      assets,
-      now,
-      garbageGroups,
-      moteLights,
-    );
-    if (!usedWebGL) {
-      snapshot.nextRow.forEach((cell, x) => {
-        if (!cell || cell.kind !== "block") return;
-        const position = logicalToScreen(
-          x,
-          -1,
-          snapshot.rise + snapshot.impactOffsetRows,
-        );
-        drawBlock(
-          target,
-          cell,
-          assets,
-          position.x,
-          position.y,
-          now,
-          true,
-          moteLights,
-        );
-      });
-
-      for (const group of garbageGroups) {
-        if (group.state === "shattering") {
-          for (const { x, y, cell } of group.positions) {
-            const motion = motionPosition(cell, x, y, now);
-            const position = logicalToScreen(
-              motion.x,
-              motion.y,
-              snapshot.rise + snapshot.impactOffsetRows,
-            );
-            if (cell.shatterReforms) {
-              drawBlockVisual(
-                target,
-                shatteringRetainedSectionVisual(cell, now),
-                assets,
-                position.x,
-                position.y,
-                4,
-                moteLights,
-              );
-            } else {
-              drawBlock(
-                target,
-                shatterProxyBlock(cell),
-                assets,
-                position.x,
-                position.y,
-                now,
-                false,
-                moteLights,
-              );
-            }
-          }
-        } else if (
-          group.state === "awakening"
-          && group.awakenReleaseAt !== undefined
-        ) {
-          const retained = retainedGarbageVisual(
-            now,
-            group.awakenReleaseAt,
-            Math.max(1, new Set(group.positions.map(({ y }) => y)).size),
-            AWAKEN_FINAL_DELAY_MS,
-          );
-          for (const { x, y, cell } of group.positions) {
-            const motion = motionPosition(cell, x, y, now);
-            const position = logicalToScreen(
-              motion.x,
-              motion.y,
-              snapshot.rise + snapshot.impactOffsetRows,
-            );
-            drawBlockVisual(
-              target,
-              retainedGarbageSectionVisual(
-                cell.awakenSource ?? "normal",
-                cell.awakenRevealAt ?? now,
-                cell.awakenSequence ?? 0,
-                retained.sectionCompression,
-                now,
-              ),
-              assets,
-              position.x,
-              position.y,
-              4,
-              moteLights,
-            );
-          }
-        }
-      }
-
-      for (let y = 0; y < snapshot.board.length; y += 1) {
-        for (let x = 0; x < BOARD_COLUMNS; x += 1) {
-          const cell = snapshot.board[y][x];
-          if (cell?.kind !== "block") continue;
-          const motion = motionPosition(cell, x, y, now);
+      const garbageGroups = collectGarbage(snapshot);
+      const moteLights = rewardMotePointLights(snapshot, now);
+      const usedWebGL = drawWebGLBlocks(
+        target,
+        snapshot,
+        assets,
+        now,
+        garbageGroups,
+        moteLights,
+      );
+      if (!usedWebGL) {
+        snapshot.nextRow.forEach((cell, x) => {
+          if (!cell || cell.kind !== "block") return;
           const position = logicalToScreen(
-            motion.x,
-            motion.y,
+            x,
+            -1,
             snapshot.rise + snapshot.impactOffsetRows,
           );
           drawBlock(
@@ -2436,41 +2343,132 @@ export function drawGame(
             position.x,
             position.y,
             now,
-            false,
+            true,
             moteLights,
           );
+        });
+
+        for (const group of garbageGroups) {
+          if (group.state === "shattering") {
+            for (const { x, y, cell } of group.positions) {
+              const motion = motionPosition(cell, x, y, now);
+              const position = logicalToScreen(
+                motion.x,
+                motion.y,
+                snapshot.rise + snapshot.impactOffsetRows,
+              );
+              if (cell.shatterReforms) {
+                drawBlockVisual(
+                  target,
+                  shatteringRetainedSectionVisual(cell, now),
+                  assets,
+                  position.x,
+                  position.y,
+                  4,
+                  moteLights,
+                );
+              } else {
+                drawBlock(
+                  target,
+                  shatterProxyBlock(cell),
+                  assets,
+                  position.x,
+                  position.y,
+                  now,
+                  false,
+                  moteLights,
+                );
+              }
+            }
+          } else if (
+            group.state === "awakening"
+            && group.awakenReleaseAt !== undefined
+          ) {
+            const retained = retainedGarbageVisual(
+              now,
+              group.awakenReleaseAt,
+              Math.max(1, new Set(group.positions.map(({ y }) => y)).size),
+              AWAKEN_FINAL_DELAY_MS,
+            );
+            for (const { x, y, cell } of group.positions) {
+              const motion = motionPosition(cell, x, y, now);
+              const position = logicalToScreen(
+                motion.x,
+                motion.y,
+                snapshot.rise + snapshot.impactOffsetRows,
+              );
+              drawBlockVisual(
+                target,
+                retainedGarbageSectionVisual(
+                  cell.awakenSource ?? "normal",
+                  cell.awakenRevealAt ?? now,
+                  cell.awakenSequence ?? 0,
+                  retained.sectionCompression,
+                  now,
+                ),
+                assets,
+                position.x,
+                position.y,
+                4,
+                moteLights,
+              );
+            }
+          }
+        }
+
+        for (let y = 0; y < snapshot.board.length; y += 1) {
+          for (let x = 0; x < BOARD_COLUMNS; x += 1) {
+            const cell = snapshot.board[y][x];
+            if (cell?.kind !== "block") continue;
+            const motion = motionPosition(cell, x, y, now);
+            const position = logicalToScreen(
+              motion.x,
+              motion.y,
+              snapshot.rise + snapshot.impactOffsetRows,
+            );
+            drawBlock(
+              target,
+              cell,
+              assets,
+              position.x,
+              position.y,
+              now,
+              false,
+              moteLights,
+            );
+          }
         }
       }
-    }
 
-    // Canvas fallback and front decals follow the same far-to-near group order.
-    // The normal WebGL path resolves the solids per pixel with the depth buffer.
-    const garbagePaintOrder = [...garbageGroups].sort((left, right) => (
-      Math.max(...right.positions.map(({ y }) => y))
-        - Math.max(...left.positions.map(({ y }) => y))
-    ));
-    for (const group of garbagePaintOrder) {
-      drawGarbage(target, group, snapshot, assets, now, !usedWebGL, moteLights);
-    }
-    target.restore();
+      // Canvas fallback and front decals follow the same far-to-near group order.
+      // The normal WebGL path resolves the solids per pixel with the depth buffer.
+      const garbagePaintOrder = [...garbageGroups].sort((left, right) => (
+        Math.max(...right.positions.map(({ y }) => y))
+          - Math.max(...left.positions.map(({ y }) => y))
+      ));
+      for (const group of garbagePaintOrder) {
+        drawGarbage(target, group, snapshot, assets, now, !usedWebGL, moteLights);
+      }
+      target.restore();
 
-    // The original swapper protrudes slightly beyond the six-column grid at
-    // either edge. Draw it after restoring the board clip so its outer claws
-    // remain visible instead of being sliced off at x=0 or x=5.
-    target.save();
-    drawCursor(target, snapshot);
-    target.restore();
+      // The original swapper protrudes slightly beyond the six-column grid at
+      // either edge. Draw it after restoring the board clip so its outer claws
+      // remain visible instead of being sliced off at x=0 or x=5.
+      target.save();
+      drawCursor(target, snapshot);
+      target.restore();
 
-    if (snapshot.status === "gameover") {
-      const mask = gameOverMaskBounds(
-        BOARD_X,
-        BOARD_TOP,
-        BOARD_WIDTH,
-        BOARD_HEIGHT,
-        CELL_SIZE,
-      );
-      target.fillStyle = `rgba(0, 0, 0, ${clamp(snapshot.gameOverElapsedMs / 1000)})`;
-      target.fillRect(mask.x, mask.y, mask.width, mask.height);
+      if (snapshot.status === "gameover") {
+        const mask = gameOverMaskBounds(
+          BOARD_X,
+          BOARD_TOP,
+          BOARD_WIDTH,
+          BOARD_HEIGHT,
+          CELL_SIZE,
+        );
+        target.fillStyle = `rgba(0, 0, 0, ${clamp(snapshot.gameOverElapsedMs / 1000)})`;
+        target.fillRect(mask.x, mask.y, mask.width, mask.height);
+      }
     }
 
     drawTransientEffects(target, snapshot, assets);
