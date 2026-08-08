@@ -1109,7 +1109,10 @@ function blockVisual(cell: BlockCell, now: number, dimmed: boolean): BlockVisual
       rotateY = Math.PI / 4;
     } else if (now < cell.awakenRevealAt) {
       const progress = clamp((now - popStarted) / AWAKEN_POP_DURATION_MS);
-      const rotation = awakeningRotation(cell.awakenSequence ?? cell.id, 1 - progress);
+      const rotation = awakeningRotation(
+        cell.awakenPopDirection ?? cell.awakenSequence ?? cell.id,
+        1 - progress,
+      );
       color = mixColor(source, color, progress);
       scale = 0.5 + 0.5 * progress;
       rotateX = rotation.rotateX;
@@ -1250,6 +1253,7 @@ function shatterProxyBlock(cell: GarbageCell): BlockCell {
     awakenRevealAt: revealAt,
     awakenSource: cell.flavor,
     awakenSequence: cell.shatterSequence,
+    awakenPopDirection: cell.shatterPopDirection,
   };
 }
 
@@ -1317,7 +1321,7 @@ function shatteringRetainedSectionVisual(cell: GarbageCell, now: number): BlockV
   return retainedGarbageSectionVisual(
     cell.flavor,
     revealAt,
-    cell.shatterSequence ?? 0,
+    cell.shatterPopDirection ?? cell.shatterSequence ?? 0,
     0,
     now,
   );
@@ -1438,7 +1442,7 @@ function renderWebGLBlocks(
           retainedGarbageSectionVisual(
             cell.awakenSource ?? "normal",
             cell.awakenRevealAt ?? now,
-            cell.awakenSequence ?? 0,
+            cell.awakenPopDirection ?? cell.awakenSequence ?? 0,
             retained.sectionCompression,
             now,
           ),
@@ -2407,7 +2411,7 @@ export function drawGame(
                 retainedGarbageSectionVisual(
                   cell.awakenSource ?? "normal",
                   cell.awakenRevealAt ?? now,
-                  cell.awakenSequence ?? 0,
+                  cell.awakenPopDirection ?? cell.awakenSequence ?? 0,
                   retained.sectionCompression,
                   now,
                 ),

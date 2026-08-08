@@ -88,6 +88,7 @@ export interface BlockCell extends Motion {
   awakenReleaseAt?: number;
   awakenSource?: GarbageFlavor;
   awakenSequence?: number;
+  awakenPopDirection?: number;
   awakenNotified?: boolean;
   comboId?: number;
 }
@@ -105,11 +106,13 @@ export interface GarbageCell extends Motion {
   clearUntil?: number;
   shatterTargetFlavor?: BlockFlavor;
   shatterSequence?: number;
+  shatterPopDirection?: number;
   shatterReforms?: boolean;
   awakenRevealAt?: number;
   awakenReleaseAt?: number;
   awakenSource?: GarbageFlavor;
   awakenSequence?: number;
+  awakenPopDirection?: number;
   comboId?: number;
   initialFallUntil?: number;
   initialImpactAt?: number;
@@ -826,6 +829,32 @@ export class CrackAttackEngine {
   private queuedAttacks: QueuedAttack[] = [];
   private attackSink: AttackSink | null;
   private randomState: number;
+  // BlockManager keeps independent, game-long generation histories for creep
+  // rows and garbage-awakened blocks. They intentionally do not inspect the
+  // live grid, whose contents may have changed through swaps and eliminations.
+  private creepLastFlavor: BlockFlavor = 0;
+  private creepSecondLastFlavor: BlockFlavor = 0;
+  private creepLastRow: BlockFlavor[] = Array.from(
+    { length: BOARD_COLUMNS },
+    () => 0,
+  );
+  private creepSecondLastRow: BlockFlavor[] = Array.from(
+    { length: BOARD_COLUMNS },
+    () => 0,
+  );
+  private awakeningLastFlavor: BlockFlavor = 0;
+  private awakeningSecondLastFlavor: BlockFlavor = 0;
+  private awakeningLastRow: BlockFlavor[] = Array.from(
+    { length: BOARD_COLUMNS },
+    () => 0,
+  );
+  private awakeningSecondLastRow: BlockFlavor[] = Array.from(
+    { length: BOARD_COLUMNS },
+    () => 0,
+  );
+  // The desktop starts at direction one, then advances before assigning the
+  // first awakening cube, producing 2, 3, 4, 1 across successive sections.
+  private nextPopDirection = 0;
   private nextId = 1;
   private nextGroupId = 1;
   private events: GameEvent[] = [];
@@ -895,6 +924,15 @@ export class CrackAttackEngine {
     this.raiseHeld = false;
     this.raiseToRowBoundary = false;
     this.queuedAttacks = [];
+    this.creepLastFlavor = 0;
+    this.creepSecondLastFlavor = 0;
+    this.creepLastRow = Array.from({ length: BOARD_COLUMNS }, () => 0);
+    this.creepSecondLastRow = Array.from({ length: BOARD_COLUMNS }, () => 0);
+    this.awakeningLastFlavor = 0;
+    this.awakeningSecondLastFlavor = 0;
+    this.awakeningLastRow = Array.from({ length: BOARD_COLUMNS }, () => 0);
+    this.awakeningSecondLastRow = Array.from({ length: BOARD_COLUMNS }, () => 0);
+    this.nextPopDirection = 0;
     this.events = [];
     this.message = null;
     this.messageUntil = 0;
@@ -1796,6 +1834,8 @@ export class CrackAttackEngine {
 
       shattering.forEach(({ x, y, cell }, fallbackSequence) => {
         const sequence = cell.shatterSequence ?? fallbackSequence;
+        const popDirection = cell.shatterPopDirection
+          ?? this.generatePopDirection();
         const revealAt = shatterStarted
           + AWAKEN_INITIAL_DELAY_MS
           + AWAKEN_INTERNAL_DELAY_MS * sequence;
@@ -1814,6 +1854,7 @@ export class CrackAttackEngine {
             awakenReleaseAt: releaseAt,
             awakenSource: cell.flavor,
             awakenSequence: sequence,
+            awakenPopDirection: popDirection,
             comboId: cell.comboId,
           };
           return;
@@ -1827,6 +1868,7 @@ export class CrackAttackEngine {
         replacement.awakenReleaseAt = releaseAt;
         replacement.awakenSource = cell.flavor;
         replacement.awakenSequence = sequence;
+        replacement.awakenPopDirection = popDirection;
         replacement.awakenNotified = false;
         replacement.comboId = cell.comboId;
         this.board[y][x] = replacement;
@@ -1927,25 +1969,30 @@ export class CrackAttackEngine {
     positions: Array<{ x: number; y: number; cell: GarbageCell }>,
   ): BlockFlavor[] {
     const result: BlockFlavor[] = [];
-    const lastByColumn = Array.from({ length: BOARD_COLUMNS }, () => [] as BlockFlavor[]);
 
     for (const { x } of positions) {
-      let flavor = this.randomNormalFlavor();
-      for (let attempt = 0; attempt < 60; attempt += 1) {
-        const horizontalTriple = result.length >= 2
-          && result[result.length - 1] === flavor
-          && result[result.length - 2] === flavor;
-        const column = lastByColumn[x];
-        const verticalTriple = column.length >= 2
-          && column[column.length - 1] === flavor
-          && column[column.length - 2] === flavor;
-        if (!horizontalTriple && !verticalTriple) break;
+      let flavor: BlockFlavor;
+      do {
         flavor = this.randomNormalFlavor();
-      }
+      } while (this.awakeningFlavorWouldTriple(flavor, x));
+
       result.push(flavor);
-      lastByColumn[x].push(flavor);
+      this.awakeningSecondLastRow[x] = this.awakeningLastRow[x];
+      this.awakeningLastRow[x] = flavor;
+      this.awakeningSecondLastFlavor = this.awakeningLastFlavor;
+      this.awakeningLastFlavor = flavor;
     }
     return result;
+  }
+
+  private awakeningFlavorWouldTriple(flavor: BlockFlavor, x: number): boolean {
+    return (
+      flavor === this.awakeningLastFlavor
+      && this.awakeningLastFlavor === this.awakeningSecondLastFlavor
+    ) || (
+      flavor === this.awakeningLastRow[x]
+      && this.awakeningLastRow[x] === this.awakeningSecondLastRow[x]
+    );
   }
 
   private shiftTimers(duration: number): void {
@@ -2416,6 +2463,7 @@ export class CrackAttackEngine {
       cell.clearUntil = clearUntil;
       cell.comboId = comboId;
       cell.shatterSequence = sequence;
+      cell.shatterPopDirection = this.generatePopDirection();
       cell.shatterReforms = reforms;
       if (!reforms) cell.shatterTargetFlavor = flavors[flavorIndex++];
     });
@@ -2565,6 +2613,8 @@ export class CrackAttackEngine {
         ) {
           flavor = this.randomNormalFlavor();
         }
+        if (y === 1) this.creepSecondLastRow[x] = flavor;
+        else if (y === 0) this.creepLastRow[x] = flavor;
         this.board[y][x] = this.createBlock(flavor);
       }
     }
@@ -2572,35 +2622,48 @@ export class CrackAttackEngine {
 
   private generateCreepRow(): Array<Cell | null> {
     const row = emptyRow();
-    const specialColumn = this.random() < 2 / 3
-      ? Math.floor(this.random() * BOARD_COLUMNS)
-      : -1;
+    // Random::chanceIn(3) makes the low third the no-special outcome.
+    const specialColumn = this.random() < 1 / 3
+      ? -1
+      : Math.floor(this.random() * BOARD_COLUMNS);
 
-    for (let x = 0; x < BOARD_COLUMNS; x += 1) {
-      const preferred = x === specialColumn ? GRAY_FLAVOR : null;
-      const flavor = this.pickSafeFlavorForRow(row, x, preferred);
+    // BlockManager::newCreepRow generates right-to-left, and its global color
+    // history crosses row boundaries in that same order.
+    for (let x = BOARD_COLUMNS - 1; x >= 0; x -= 1) {
+      let flavor: BlockFlavor;
+      if (
+        x === specialColumn
+        && !this.creepFlavorWouldTriple(GRAY_FLAVOR, x)
+      ) {
+        flavor = GRAY_FLAVOR;
+      } else {
+        do {
+          flavor = this.randomNormalFlavor();
+        } while (this.creepFlavorWouldTriple(flavor, x));
+      }
+
       row[x] = this.createBlock(flavor);
+      this.creepSecondLastRow[x] = this.creepLastRow[x];
+      this.creepLastRow[x] = flavor;
+      this.creepSecondLastFlavor = this.creepLastFlavor;
+      this.creepLastFlavor = flavor;
     }
     return row;
   }
 
-  private pickSafeFlavorForRow(
-    row: Array<Cell | null>,
-    x: number,
-    preferred: BlockFlavor | null,
-  ): BlockFlavor {
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      const flavor = (attempt === 0 && preferred !== null
-        ? preferred
-        : this.randomNormalFlavor()) as BlockFlavor;
-      const horizontal = x >= 2
-        && (row[x - 1] as BlockCell | null)?.flavor === flavor
-        && (row[x - 2] as BlockCell | null)?.flavor === flavor;
-      const vertical = (this.board[0][x] as BlockCell | null)?.flavor === flavor
-        && (this.board[1][x] as BlockCell | null)?.flavor === flavor;
-      if (!horizontal && !vertical) return flavor;
-    }
-    return this.randomNormalFlavor();
+  private creepFlavorWouldTriple(flavor: BlockFlavor, x: number): boolean {
+    return (
+      flavor === this.creepLastFlavor
+      && this.creepLastFlavor === this.creepSecondLastFlavor
+    ) || (
+      flavor === this.creepLastRow[x]
+      && this.creepLastRow[x] === this.creepSecondLastRow[x]
+    );
+  }
+
+  private generatePopDirection(): number {
+    this.nextPopDirection = (this.nextPopDirection + 1) & 3;
+    return this.nextPopDirection;
   }
 
   private createBlock(flavor: BlockFlavor): BlockCell {
