@@ -44,6 +44,7 @@ export const DEATH_SPARK_GRAVITY = 0.001 / 2;
 export const DEATH_SPARK_DRAG = 0.001;
 export const LEVEL_LIGHT_FADE_MS = 3000;
 export const LEVEL_LIGHT_IMPACT_FLASH_MS = 20 * 20;
+export const LEVEL_LIGHT_DEATH_FLASH_TICKS = 12;
 export const GARBAGE_ROW_REFORM_CHANCE = 0.5;
 export const GARBAGE_QUEUE_CAPACITY = 8;
 export const SWAP_DURATION_MS = 6 * 20;
@@ -134,7 +135,7 @@ export interface MatchResult {
 
 export interface RewardSign {
   id: number;
-  kind: "magnitude" | "multiplier";
+  kind: "bonus" | "magnitude" | "multiplier";
   value: number;
   gridX: number;
   gridY: number;
@@ -554,6 +555,8 @@ export interface GameSnapshot {
   topOccupiedRow: number;
   levelLightBlends: number[];
   levelLightImpactFlashes: number[];
+  dangerActive: boolean;
+  dangerFlashAlarm: number;
   dangerMs: number;
   loseBar: LoseBarState;
   incomingCount: number;
@@ -569,6 +572,7 @@ export interface GameSnapshot {
   rewardMotes: RewardMote[];
   awakeningCount: number;
   nextAwakeningMs: number | null;
+  pausedElapsedMs: number;
   visualNow: number;
 }
 
@@ -812,7 +816,8 @@ export class CrackAttackEngine {
   private nextComboId = 1;
   private legacyComboId: number | null = null;
   private dangerMs = 0;
-  private wasInDanger = false;
+  private dangerActive = false;
+  private dangerFlashAlarm = -1;
   private loseBarPhase: LoseBarPhase = "inactive";
   private loseBarProgress = 0;
   private loseBarFadeTicks = 0;
@@ -882,7 +887,8 @@ export class CrackAttackEngine {
     this.nextComboId = 1;
     this.legacyComboId = null;
     this.dangerMs = 0;
-    this.wasInDanger = false;
+    this.dangerActive = false;
+    this.dangerFlashAlarm = -1;
     this.loseBarPhase = "inactive";
     this.loseBarProgress = 0;
     this.loseBarFadeTicks = 0;
@@ -1005,11 +1011,17 @@ export class CrackAttackEngine {
     const awakening = this.awakeningCount();
     const eliminationActive = this.hasActiveClears() || awakening > 0;
 
+    // LevelLights::timeStep runs before Creep::timeStep. Once a death-flash
+    // cycle has started it therefore keeps advancing even while an elimination
+    // freezes the loss alarm, and it finishes its current cycle after safety.
+    this.stepDangerFlashAlarm(inDanger);
+
     // Original Creep::timeStep raises a high-alert loss alarm back to
     // GC_LOSS_DELAY_ELIMINATION while any blocks are dying or awakening. Our
     // timer counts upward, so the equivalent operation is a clamp to the
     // purple/red boundary, preserving a full second when play resumes.
-    const resetHighAlert = inDanger
+    const resetHighAlert = this.dangerActive
+      && inDanger
       && eliminationActive
       && this.dangerMs > DANGER_HIGH_ALERT_MS;
     if (resetHighAlert) {
@@ -1020,14 +1032,20 @@ export class CrackAttackEngine {
       }
     }
 
-    if (inDanger && !eliminationActive) {
-      this.dangerMs += delta;
-      if (!this.wasInDanger) this.events.push({ type: "danger" });
-    } else if (!inDanger) {
+    if (this.dangerActive && !inDanger) {
+      this.dangerActive = false;
       this.dangerMs = 0;
+    } else if (this.dangerActive && !eliminationActive) {
+      this.dangerMs += delta;
+    } else if (!this.dangerActive && inDanger && !eliminationActive) {
+      // Creep initializes its countdown on this tick; it does not decrement it
+      // until the following tick. LoseBar consequently enters low alert at 0.
+      this.dangerActive = true;
+      this.dangerMs = 0;
+      this.dangerFlashAlarm = LEVEL_LIGHT_DEATH_FLASH_TICKS;
+      this.events.push({ type: "danger" });
     }
-    this.wasInDanger = inDanger;
-    this.stepLoseBar(inDanger);
+    this.stepLoseBar(this.dangerActive);
 
     if (this.dangerMs >= DANGER_LOSS_DELAY_MS) {
       this.finishGame(now);
@@ -1289,6 +1307,8 @@ export class CrackAttackEngine {
       levelLightImpactFlashes: this.levelLightImpactUntil.map((_, index) => (
         this.levelLightImpactFlashAt(index, visualNow)
       )),
+      dangerActive: this.dangerActive,
+      dangerFlashAlarm: this.dangerFlashAlarmAt(now),
       dangerMs: this.dangerMs,
       loseBar: {
         phase: this.loseBarPhase,
@@ -1312,6 +1332,7 @@ export class CrackAttackEngine {
       rewardMotes: this.rewardMotes.filter((mote) => visualNow < mote.until),
       awakeningCount,
       nextAwakeningMs: nextAwakeningAt === null ? null : Math.max(0, nextAwakeningAt - visualNow),
+      pausedElapsedMs: this.status === "paused" ? Math.max(0, now - this.pausedAt) : 0,
       visualNow,
     };
   }
@@ -1648,19 +1669,9 @@ export class CrackAttackEngine {
     const signAnchor = effectivePatterns[effectivePatterns.length - 1].anchor;
     // GarbageGenerator creates the sign before queueing garbage and its mote.
     // That order matters because all three consume the shared random stream.
-    if (totalMagnitude > 3) {
-      this.createRewardSign("magnitude", totalMagnitude, signAnchor, now);
-    }
     let moteSibling = combo.multiplier > 1 ? 1 : 0;
-    for (const attack of magnitudeAttacks(normalMagnitude, now)) {
-      this.emitAttack(attack);
-      this.createRewardMote(
-        "magnitude",
-        signAnchor,
-        Math.max(0, Math.min(3, attack.width - 3)),
-        now,
-        moteSibling++,
-      );
+    if (grayMagnitude >= 3) {
+      this.createRewardSign("bonus", 0, signAnchor, now);
     }
     for (let n = 0; n < Math.max(0, grayMagnitude - 2); n += 1) {
       this.emitAttack({
@@ -1672,8 +1683,21 @@ export class CrackAttackEngine {
       });
       this.createRewardMote("magnitude", signAnchor, 3, now, moteSibling++);
     }
-    // The original deliberately shows no sign at all for an ordinary match
-    // of three; points still accrue in the score display.
+    if (normalMagnitude > 3) {
+      this.createRewardSign("magnitude", normalMagnitude, signAnchor, now);
+    }
+    for (const attack of magnitudeAttacks(normalMagnitude, now)) {
+      this.emitAttack(attack);
+      this.createRewardMote(
+        "magnitude",
+        signAnchor,
+        Math.max(0, Math.min(3, attack.width - 3)),
+        now,
+        moteSibling++,
+      );
+    }
+    // The original deliberately shows no sign for an ordinary colored match
+    // of three; gray matches use the special BONUS sign above.
     this.message = null;
     this.messageUntil = 0;
 
@@ -2860,6 +2884,25 @@ export class CrackAttackEngine {
     return Math.max(0, Math.min(1, linear)) ** 2;
   }
 
+  private stepDangerFlashAlarm(inDanger: boolean): void {
+    if (this.dangerFlashAlarm < 0) return;
+    if (this.dangerFlashAlarm > 0) {
+      this.dangerFlashAlarm -= 1;
+      return;
+    }
+    this.dangerFlashAlarm = inDanger ? LEVEL_LIGHT_DEATH_FLASH_TICKS : -1;
+  }
+
+  private dangerFlashAlarmAt(now: number): number {
+    if (this.status !== "gameover" || this.dangerFlashAlarm < 0) {
+      return this.dangerFlashAlarm;
+    }
+    // After play ends, the desktop meta loop lets the active flash finish but
+    // cannot restart it because the game-play state bit is no longer present.
+    const elapsedTicks = Math.floor(Math.max(0, now - this.gameOverAt) / SIMULATION_STEP_MS);
+    return Math.max(-1, this.dangerFlashAlarm - elapsedTicks);
+  }
+
   private syncLevelLights(now: number): void {
     const topRow = this.topOccupiedRow(now);
     for (let level = 0; level < VISIBLE_ROWS; level += 1) {
@@ -2923,7 +2966,9 @@ export class CrackAttackEngine {
     this.rewardSigns.push({
       id: this.nextEffectId++,
       kind,
-      value: Math.max(multiplier ? 2 : 4, Math.min(12, value)),
+      value: kind === "bonus"
+        ? 0
+        : Math.max(multiplier ? 2 : 4, Math.min(12, value)),
       gridX,
       gridY,
       // The desktop offsets signs half a cell left and half a cell above the

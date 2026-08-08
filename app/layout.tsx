@@ -13,6 +13,7 @@ const gameImagePreloads = [
   "/crack-attack-assets/count_down_2.png",
   "/crack-attack-assets/count_down_3.png",
   "/crack-attack-assets/count_down_go.png",
+  "/crack-attack-assets/sign_bonus.png",
   ...Array.from(
     { length: 6 },
     (_, index) => `/crack-attack-assets/garbage_flavor_${index.toString().padStart(3, "0")}.png`,

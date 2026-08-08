@@ -11,7 +11,8 @@ const LEVEL_LIGHT_WHITE: Color3 = [1, 1, 1];
 const LOSE_BAR_BLUE: Color3 = [0, 0, 0.8];
 const LOSE_BAR_PURPLE: Color3 = [0.64, 0, 0.64];
 const LOSE_BAR_RED: Color3 = [0.8, 0, 0];
-const LEVEL_LIGHT_FLASH_MS = 13 * 20;
+const LEVEL_LIGHT_DEATH_FLASH_TICKS = 12;
+const MESSAGE_PULSE_PERIOD_MS = 320 * 20;
 
 const LOSE_BAR_TONES = [
   { position: 0, light: 0.44, specular: 0.082 },
@@ -24,6 +25,18 @@ const LOSE_BAR_TONES = [
 
 function clamp(value: number, min = 0, max = 1): number {
   return Math.max(min, Math.min(max, value));
+}
+
+export function doubleTriangularFlash(progress: number): number {
+  const phase = clamp(progress) * 4;
+  return 1 - Math.abs((phase % 2) - 1);
+}
+
+export function messagePulseAlpha(elapsedMs: number): number {
+  const cosine = Math.cos(
+    (Math.max(0, elapsedMs) / MESSAGE_PULSE_PERIOD_MS) * Math.PI * 2,
+  );
+  return clamp(0.75 + 0.6 * cosine * cosine);
 }
 
 function mixColor(from: Color3, to: Color3, amount: number): Color3 {
@@ -75,7 +88,7 @@ function normalize(vector: Vector3): Vector3 {
 
 export function levelLightColor(
   occupancy: boolean | number,
-  dangerMs: number,
+  dangerFlashAlarm: number,
   impactFlash = 0,
 ): Color3 {
   const blend = clamp(typeof occupancy === "boolean" ? (occupancy ? 1 : 0) : occupancy);
@@ -86,12 +99,11 @@ export function levelLightColor(
     LEVEL_LIGHT_RED[1] * redEnergy + LEVEL_LIGHT_BLUE[1] * blueEnergy,
     LEVEL_LIGHT_RED[2] * redEnergy + LEVEL_LIGHT_BLUE[2] * blueEnergy,
   ];
-  const phase = dangerMs > 0
-    ? (dangerMs % LEVEL_LIGHT_FLASH_MS) / LEVEL_LIGHT_FLASH_MS
-    : 0;
-  const dangerFlash = dangerMs > 0
-    ? (phase <= 0.5 ? phase * 2 : (1 - phase) * 2)
-    : 0;
+  let dangerFlash = 0;
+  if (dangerFlashAlarm >= 0) {
+    dangerFlash = dangerFlashAlarm * (2 / LEVEL_LIGHT_DEATH_FLASH_TICKS);
+    if (dangerFlash > 1) dangerFlash = 2 - dangerFlash;
+  }
   const whiteAmount = 1 - (1 - dangerFlash) * (1 - clamp(impactFlash));
   return mixColor(base, LEVEL_LIGHT_WHITE, whiteAmount);
 }
@@ -187,9 +199,8 @@ export function garbageShatterVisual(
   if (boundedProgress < flashFraction) {
     // The original runs two triangular white flashes during its first twelve
     // 50 Hz ticks, then switches to a moving OpenGL clip plane.
-    const phase = (boundedProgress / flashFraction) * 4;
     return {
-      flash: 1 - Math.abs((phase % 2) - 1),
+      flash: doubleTriangularFlash(boundedProgress / flashFraction),
       clipMinY: null,
     };
   }

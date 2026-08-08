@@ -35,6 +35,7 @@ import {
   creepRowBlockMaterial,
   countdownVisual,
   createGarbageMesh,
+  doubleTriangularFlash,
   formatSoloScore,
   gameOverMaskBounds,
   gameOverCenterY,
@@ -43,6 +44,7 @@ import {
   levelLightScreenY,
   loseBarToneAt,
   loseBarVisual,
+  messagePulseAlpha,
   playfieldVisible,
   retainedGarbageVisual,
   type Color3,
@@ -88,6 +90,7 @@ export interface RenderAssets {
   messagePaused: HTMLImageElement | null;
   messageGameOver: HTMLImageElement | null;
   countdown: Record<"1" | "2" | "3" | "GO!", HTMLImageElement | null>;
+  bonusSign: HTMLImageElement | null;
   magnitudeSigns: Array<HTMLImageElement | null>;
   multiplierSigns: Array<HTMLImageElement | null>;
   blockMesh: BlockMesh | null;
@@ -859,10 +862,10 @@ function drawLevelLights(context: CanvasRenderingContext2D, snapshot: GameSnapsh
     const impactFlash = snapshot.levelLightImpactFlashes[level] ?? 0;
     const color = levelLightColor(
       snapshot.levelLightBlends[level] ?? 0,
-      snapshot.dangerMs,
+      snapshot.dangerFlashAlarm,
       impactFlash,
     );
-    const flashing = snapshot.dangerMs > 0 || impactFlash > 0;
+    const flashing = snapshot.dangerFlashAlarm >= 0 || impactFlash > 0;
     drawLevelTriangle(context, 18, y, 1, color, flashing);
     drawLevelTriangle(context, 782, y, -1, color, flashing);
   }
@@ -1086,7 +1089,7 @@ function blockVisual(cell: BlockCell, now: number, dimmed: boolean): BlockVisual
     const progress = clamp((now - cell.clearStarted) / (cell.clearUntil - cell.clearStarted));
     if (progress < DYING_FLASH_FRACTION) {
       const flashProgress = progress / DYING_FLASH_FRACTION;
-      const flash = Math.abs(Math.sin(flashProgress * Math.PI * 2));
+      const flash = doubleTriangularFlash(flashProgress);
       color = mixColor(color, [1, 1, 1], flash);
     } else {
       const tumble = (progress - DYING_FLASH_FRACTION) / (1 - DYING_FLASH_FRACTION);
@@ -2128,6 +2131,7 @@ function rewardSignImage(
   sign: RewardSign,
   assets: RenderAssets,
 ): HTMLImageElement | null {
+  if (sign.kind === "bonus") return assets.bonusSign;
   if (sign.kind === "magnitude") return assets.magnitudeSigns[sign.value - 4] ?? null;
   return assets.multiplierSigns[sign.value - 2] ?? null;
 }
@@ -2223,9 +2227,7 @@ function drawReadyScreen(
 ): void {
   const centerX = BOARD_X + BOARD_WIDTH / 2;
   const messageCenterY = VIEW_CENTER_Y - (13 / 6) * CELL_SIZE;
-  const pulse = clamp(
-    0.75 + 0.6 * Math.cos((snapshot.visualNow / 6400) * Math.PI * 2) ** 2,
-  );
+  const pulse = messagePulseAlpha(snapshot.visualNow);
   context.save();
   context.globalAlpha = pulse;
   drawCenteredAsset(
@@ -2278,7 +2280,10 @@ function drawStatusArt(
   if (snapshot.status === "ready") {
     drawReadyScreen(context, snapshot, assets, highScore, useTouchPrompt);
   } else if (snapshot.status === "paused") {
+    context.save();
+    context.globalAlpha = messagePulseAlpha(snapshot.pausedElapsedMs);
     drawCenteredAsset(context, assets.messagePaused, BOARD_WIDTH, BOARD_WIDTH / 4);
+    context.restore();
   } else if (snapshot.status === "gameover") {
     drawGameOverArt(context, snapshot, assets);
   }

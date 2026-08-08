@@ -76,6 +76,8 @@ interface EngineHarness {
   resolvingChain: boolean;
   backgroundFallUntil: number;
   dangerMs: number;
+  dangerActive: boolean;
+  dangerFlashAlarm: number;
   elapsedMs: number;
   gameOverAt: number;
   lastUpdate: number | null;
@@ -107,7 +109,7 @@ interface EngineHarness {
     sibling: number,
   ): void;
   createRewardSign(
-    kind: "magnitude" | "multiplier",
+    kind: "bonus" | "magnitude" | "multiplier",
     value: number,
     anchor: Coordinate,
     now: number,
@@ -341,7 +343,7 @@ test("two late lines add two levels to an already-running higher combo", () => {
   );
 });
 
-test("ordinary triples stay silent while larger clears use compact reward signs", () => {
+test("colored triples stay silent while gray triples and larger clears use reward signs", () => {
   const tripleEngine = new CrackAttackEngine({ seed: 0x101010 });
   const tripleInternals = harness(tripleEngine);
   const tripleBoard = createEmptyBoard();
@@ -355,6 +357,20 @@ test("ordinary triples stay silent while larger clears use compact reward signs"
   let snapshot = tripleEngine.getSnapshot(1000);
   assert.equal(snapshot.message, null);
   assert.equal(snapshot.rewardSigns.length, 0);
+
+  const grayEngine = new CrackAttackEngine({ seed: 0x151515 });
+  const grayInternals = harness(grayEngine);
+  const grayBoard = createEmptyBoard();
+  for (let x = 0; x < 3; x += 1) grayBoard[2][x] = block(65 + x, 5);
+  const gray = findMatches(grayBoard);
+  grayInternals.board = grayBoard;
+  grayInternals.status = "playing";
+  grayInternals.phase = "idle";
+  grayInternals.startClear(gray.coordinates, false, 1000, gray.patterns);
+  assert.deepEqual(
+    grayEngine.getSnapshot(1000).rewardSigns.map(({ kind, value }) => ({ kind, value })),
+    [{ kind: "bonus", value: 0 }],
+  );
 
   tripleEngine.update(1000 + BLOCK_CLEAR_DURATION_MS - 1);
   snapshot = tripleEngine.getSnapshot(1000 + BLOCK_CLEAR_DURATION_MS - 1);
@@ -508,7 +524,7 @@ test("a simultaneous gray line supersedes colored points like the original", () 
   const engine = new CrackAttackEngine({ seed: 0x606165 });
   const internals = harness(engine);
   const board = createEmptyBoard();
-  for (let x = 0; x < 3; x += 1) board[1][x] = block(700 + x, 1);
+  for (let x = 0; x < 4; x += 1) board[1][x] = block(700 + x, 1);
   for (let x = 3; x < 6; x += 1) board[3][x] = block(710 + x, 5);
   const matches = findMatches(board);
 
@@ -521,6 +537,14 @@ test("a simultaneous gray line supersedes colored points like the original", () 
     engine.getSnapshot(1000).score,
     baseScoreFor(3, true),
     "Score::reportElimination ignores the colored magnitude when gray is present",
+  );
+  assert.deepEqual(
+    engine.getSnapshot(1000).rewardSigns.map(({ kind, value }) => ({ kind, value })),
+    [
+      { kind: "bonus", value: 0 },
+      { kind: "magnitude", value: 4 },
+    ],
+    "gray garbage gets BONUS before the colored clear's independent magnitude sign",
   );
 });
 
@@ -605,6 +629,7 @@ test("falling alone does not pause the game-over clock", () => {
   internals.phase = "idle";
   internals.backgroundFallUntil = 2000;
   internals.dangerMs = 1000;
+  internals.dangerActive = true;
   internals.lastUpdate = 1000;
 
   engine.update(1020);
@@ -735,7 +760,10 @@ test("pausing the opening preserves the remaining countdown", () => {
   const engine = new CrackAttackEngine({ seed: 0x343536 });
   engine.start(100);
   engine.togglePause(600);
-  assert.equal(engine.getSnapshot(1600).status, "paused");
+  const paused = engine.getSnapshot(1600);
+  assert.equal(paused.status, "paused");
+  assert.equal(paused.visualNow, 600, "board animation remains frozen while paused");
+  assert.equal(paused.pausedElapsedMs, 1000, "the pause message keeps its own pulse clock");
 
   engine.togglePause(2100);
   let snapshot = engine.getSnapshot(2100);
@@ -769,6 +797,67 @@ test("occupied level lights fade from blue through purple on the original cadenc
   assert.equal(complete.levelLightBlends[complete.topOccupiedRow], 1);
 });
 
+test("an elimination delays a new danger alarm and an active light flash keeps stepping", () => {
+  const engine = new CrackAttackEngine({ seed: 0x575757 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  for (let y = 0; y < VISIBLE_ROWS; y += 1) {
+    board[y][BOARD_COLUMNS - 1] = block(320 + y, (y % 2) as BlockFlavor);
+  }
+  const dying = block(350, 3);
+  dying.state = "clearing";
+  dying.clearStarted = 1000;
+  dying.clearUntil = 1100;
+  board[0][0] = dying;
+
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "clearing";
+  internals.phaseUntil = 1100;
+  internals.lastUpdate = 1000;
+
+  engine.update(1020);
+  let snapshot = engine.getSnapshot(1020);
+  assert.equal(snapshot.dangerActive, false);
+  assert.equal(snapshot.dangerMs, 0);
+  assert.equal(snapshot.dangerFlashAlarm, -1);
+  assert.equal(snapshot.loseBar.phase, "inactive");
+
+  engine.update(1100);
+  snapshot = engine.getSnapshot(1100);
+  assert.equal(snapshot.dangerActive, true);
+  assert.equal(snapshot.dangerMs, 0, "the loss countdown starts without losing its first tick");
+  assert.equal(snapshot.dangerFlashAlarm, 12);
+  assert.deepEqual(snapshot.loseBar, { phase: "low", progress: 0, fade: 0 });
+
+  const secondDying = block(351, 4);
+  secondDying.state = "clearing";
+  secondDying.clearStarted = 1100;
+  secondDying.clearUntil = 1300;
+  board[0][1] = secondDying;
+  internals.phase = "clearing";
+  internals.phaseUntil = 1300;
+  engine.update(1220);
+  snapshot = engine.getSnapshot(1220);
+  assert.equal(snapshot.dangerMs, 0, "dying blocks freeze the active loss countdown");
+  assert.equal(snapshot.dangerFlashAlarm, 6, "six real 20 ms ticks reach the white flash frame");
+
+  board[VISIBLE_ROWS - 1][BOARD_COLUMNS - 1] = null;
+  engine.update(1240);
+  snapshot = engine.getSnapshot(1240);
+  assert.equal(snapshot.dangerActive, false);
+  assert.equal(snapshot.dangerFlashAlarm, 5, "safety does not cut off the active flash cycle");
+  engine.update(1360);
+  assert.equal(engine.getSnapshot(1360).dangerFlashAlarm, -1);
+
+  internals.status = "gameover";
+  internals.gameOverAt = 1360;
+  internals.dangerFlashAlarm = 1;
+  assert.equal(engine.getSnapshot(1379).dangerFlashAlarm, 1);
+  assert.equal(engine.getSnapshot(1380).dangerFlashAlarm, 0);
+  assert.equal(engine.getSnapshot(1400).dangerFlashAlarm, -1);
+});
+
 test("a breaking line restores the original one-second danger grace", () => {
   const engine = new CrackAttackEngine({ seed: 0xdadada });
   const internals = harness(engine);
@@ -785,6 +874,7 @@ test("a breaking line restores the original one-second danger grace", () => {
   internals.status = "playing";
   internals.phase = "idle";
   internals.dangerMs = DANGER_LOSS_DELAY_MS - 250;
+  internals.dangerActive = true;
   internals.lastUpdate = 1000;
   internals.startClear([{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }], false, 1000);
 
@@ -826,6 +916,7 @@ test("garbage awakening restores danger grace without moving an earlier warning"
   internals.phase = "idle";
   internals.lastUpdate = 1000;
   internals.dangerMs = DANGER_HIGH_ALERT_MS - 500;
+  internals.dangerActive = true;
   engine.update(1020);
   assert.equal(
     engine.getSnapshot(1020).dangerMs,
@@ -1868,12 +1959,12 @@ test("the lose bar fades out from both alerts and eases a reset high alert", () 
   engine.update(1020);
   let state = engine.getSnapshot(1020).loseBar;
   assert.equal(state.phase, "low");
-  assert.equal(state.progress, 20 / DANGER_HIGH_ALERT_MS);
+  assert.equal(state.progress, 0, "the newly initialized loss alarm has not decremented yet");
 
   board[VISIBLE_ROWS - 1][0] = null;
   engine.update(1040);
   state = engine.getSnapshot(1040).loseBar;
-  assert.deepEqual(state, { phase: "fade-low", progress: 20 / DANGER_HIGH_ALERT_MS, fade: 1 });
+  assert.deepEqual(state, { phase: "fade-low", progress: 0, fade: 1 });
   engine.update(1040 + LOSE_BAR_FADE_TICKS * 20);
   assert.deepEqual(engine.getSnapshot(1440).loseBar, {
     phase: "inactive",
@@ -1884,6 +1975,7 @@ test("the lose bar fades out from both alerts and eases a reset high alert", () 
   board[VISIBLE_ROWS - 1][0] = block(13001, 1);
   internals.loseBarPhase = "low";
   internals.dangerMs = DANGER_HIGH_ALERT_MS - 20;
+  internals.dangerActive = true;
   engine.update(1460);
   assert.equal(engine.getSnapshot(1460).loseBar.phase, "high");
 
