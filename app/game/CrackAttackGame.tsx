@@ -60,6 +60,7 @@ const IMAGE_SOURCES = {
     "3": gameAssetUrl("count_down_3.png"),
     "GO!": gameAssetUrl("count_down_go.png"),
   },
+  bonusSign: gameAssetUrl("sign_bonus.png"),
   magnitudeSigns: Array.from(
     { length: 9 },
     (_, index) => gameAssetUrl(`sign_${index + 4}.png`),
@@ -284,7 +285,7 @@ function statusCopy(
       restartReady ? "Restart available" : "Restart unlocks shortly"
     }`;
   }
-  if (snapshot.dangerMs > 0) return "Danger: clear the top row before time runs out";
+  if (snapshot.dangerActive) return "Danger: clear the top row before time runs out";
   if (snapshot.awakeningCount > 0) return `${snapshot.awakeningCount} garbage blocks are revealing their colors`;
   if (snapshot.incomingCount > 0) return `${snapshot.incomingCount} garbage attack${snapshot.incomingCount === 1 ? "" : "s"} incoming`;
   return `Score ${snapshot.displayScore}`;
@@ -304,6 +305,7 @@ export default function CrackAttackGame() {
     messagePaused: null,
     messageGameOver: null,
     countdown: { "1": null, "2": null, "3": null, "GO!": null },
+    bonusSign: null,
     magnitudeSigns: [],
     multiplierSigns: [],
     blockMesh: null,
@@ -384,6 +386,7 @@ export default function CrackAttackGame() {
       loadImage(IMAGE_SOURCES.countdown["2"]),
       loadImage(IMAGE_SOURCES.countdown["3"]),
       loadImage(IMAGE_SOURCES.countdown["GO!"]),
+      loadImage(IMAGE_SOURCES.bonusSign),
       Promise.all(IMAGE_SOURCES.magnitudeSigns.map((source) => loadImage(source))),
       Promise.all(IMAGE_SOURCES.multiplierSigns.map((source) => loadImage(source))),
       settleWithin(loadBlockMesh(gameAssetUrl("block.obj"))),
@@ -401,6 +404,7 @@ export default function CrackAttackGame() {
       countdownTwo,
       countdownThree,
       countdownGo,
+      bonusSign,
       magnitudeSigns,
       multiplierSigns,
       blockMesh,
@@ -421,6 +425,7 @@ export default function CrackAttackGame() {
           "3": countdownThree,
           "GO!": countdownGo,
         },
+        bonusSign,
         magnitudeSigns,
         multiplierSigns,
         blockMesh,

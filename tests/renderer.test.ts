@@ -11,6 +11,7 @@ import {
   creepRowBlockMaterial,
   countdownVisual,
   createGarbageMesh,
+  doubleTriangularFlash,
   formatSoloScore,
   gameOverMaskBounds,
   gameOverCenterY,
@@ -19,6 +20,7 @@ import {
   levelLightScreenY,
   loseBarToneAt,
   loseBarVisual,
+  messagePulseAlpha,
   playfieldVisible,
   retainedGarbageVisual,
 } from "../app/game/renderGeometry.ts";
@@ -161,13 +163,14 @@ test("the block asset keeps the original high-detail folds and beveled edges", (
 });
 
 test("level lights preserve occupancy color through danger and row-impact flashes", () => {
-  const empty = levelLightColor(false, 0);
-  const occupied = levelLightColor(true, 0);
-  const halfway = levelLightColor(0.5, 0);
-  const dangerEmpty = levelLightColor(false, 260);
-  const dangerOccupied = levelLightColor(true, 260);
-  const dangerWhite = levelLightColor(false, 130);
-  const impactWhite = levelLightColor(false, 0, 1);
+  const empty = levelLightColor(false, -1);
+  const occupied = levelLightColor(true, -1);
+  const halfway = levelLightColor(0.5, -1);
+  const dangerEmpty = levelLightColor(false, 12);
+  const dangerOccupied = levelLightColor(true, 12);
+  const dangerWhite = levelLightColor(false, 6);
+  const dangerEnd = levelLightColor(false, 0);
+  const impactWhite = levelLightColor(false, -1, 1);
 
   assert.ok(empty[2] > 0.95 && empty[0] < 0.1, "an empty level is solid blue");
   assert.ok(occupied[0] > 0.95 && occupied[2] < 0.1, "an occupied level is solid red");
@@ -178,7 +181,22 @@ test("level lights preserve occupancy color through danger and row-impact flashe
   assert.deepEqual(dangerEmpty, empty, "danger preserves an empty level's blue base");
   assert.deepEqual(dangerOccupied, occupied, "danger preserves an occupied level's red base");
   assert.deepEqual(dangerWhite, [1, 1, 1], "the full-board flash reaches white");
+  assert.deepEqual(dangerEnd, empty, "the 12-tick flash returns exactly to its base color");
   assert.deepEqual(impactWhite, [1, 1, 1], "an impacted row independently reaches white");
+});
+
+test("dying blocks use the original pair of triangular flashes", () => {
+  const expected = [0, 1 / 3, 2 / 3, 1, 2 / 3, 1 / 3, 0, 1 / 3, 2 / 3, 1, 2 / 3, 1 / 3];
+  expected.forEach((value, age) => {
+    assert.ok(Math.abs(doubleTriangularFlash(age / 12) - value) < 1e-12);
+  });
+});
+
+test("normal messages pulse on the original 320-tick cycle", () => {
+  assert.equal(messagePulseAlpha(0), 1);
+  assert.equal(messagePulseAlpha(1600), 0.75);
+  assert.equal(messagePulseAlpha(3200), 1);
+  assert.equal(messagePulseAlpha(6400), 1);
 });
 
 test("the countdown recreates the original rush toward the viewer", () => {
