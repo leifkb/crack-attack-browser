@@ -140,6 +140,7 @@ interface EngineHarness {
     attack: AttackPayload & { dropAt: number },
     now: number,
   ): boolean;
+  applyGravity(now: number, noHang?: boolean): number;
   markShatteringGarbage(
     direct: Set<number>,
     clearStarted: number,
@@ -991,6 +992,32 @@ test("an elimination delays a new danger alarm and an active light flash keeps s
   assert.equal(engine.getSnapshot(1400).dangerFlashAlarm, -1);
 });
 
+test("the first danger tick still completes its source-authorized creep step", () => {
+  const engine = new CrackAttackEngine({ seed: 0x585858 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  board[VISIBLE_ROWS - 1][0] = block(360, 0);
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.lastUpdate = 1000;
+  internals.rise = 0.99;
+  engine.setRaiseHeld(true);
+
+  engine.update(1020);
+  let snapshot = engine.getSnapshot(1020);
+  assert.equal(snapshot.dangerActive, true);
+  assert.equal(snapshot.dangerMs, 0);
+  assert.equal(snapshot.cursorY, 4, "the transition tick finishes the pending row raise");
+  assert.ok(snapshot.rise > 0 && snapshot.rise < 0.05);
+
+  const frozenRise = snapshot.rise;
+  engine.update(1040);
+  snapshot = engine.getSnapshot(1040);
+  assert.equal(snapshot.dangerMs, 20);
+  assert.equal(snapshot.rise, frozenRise, "subsequent danger ticks freeze creep");
+});
+
 test("a breaking line restores the original one-second danger grace", () => {
   const engine = new CrackAttackEngine({ seed: 0xdadada });
   const internals = harness(engine);
@@ -1457,6 +1484,50 @@ test("incoming garbage hangs above the board and falls three ticks per row", () 
   );
 });
 
+test("falling residents retain their desktop grid height until each row step", () => {
+  const engine = new CrackAttackEngine({ seed: 0x464748 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  board[VISIBLE_ROWS - 1][0] = block(9050, 0);
+  internals.board = board;
+
+  assert.equal(internals.applyGravity(1000), 60 + (VISIBLE_ROWS - 1) * 60);
+  assert.equal(engine.getSnapshot(1000).topOccupiedRow, VISIBLE_ROWS - 1);
+  assert.equal(
+    engine.getSnapshot(1060).topOccupiedRow,
+    VISIBLE_ROWS - 2,
+    "the grid row advances on the tick that ends the hang",
+  );
+  assert.equal(engine.getSnapshot(1120).topOccupiedRow, VISIBLE_ROWS - 3);
+  assert.equal(engine.getSnapshot(1720).topOccupiedRow, 0);
+});
+
+test("new garbage uses the current grid row of a falling resident as its ceiling", () => {
+  const engine = new CrackAttackEngine({ seed: 0x474849 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  board[20][0] = block(9060, 0);
+  internals.board = board;
+  internals.applyGravity(1000);
+
+  assert.equal(internals.dropGarbage({
+    height: 1,
+    width: BOARD_COLUMNS,
+    flavor: "normal",
+    source: "clear",
+    createdAt: 1060,
+    dropAt: 1060,
+  }, 1060), true);
+  const incoming = board.flat().find((cell): cell is GarbageCell => (
+    cell?.kind === "garbage"
+  ));
+  assert.equal(
+    incoming?.animationFromY,
+    20,
+    "the first fall step lowers the occupied ceiling before the next drop",
+  );
+});
+
 test("initial garbage impact advances the original area-weighted spring at 50 Hz", () => {
   const engine = new CrackAttackEngine({ seed: 0x48494a });
   const internals = harness(engine);
@@ -1567,7 +1638,7 @@ test("cursor movement glides with the original quadratic timing", () => {
 
   snapshot = engine.getSnapshot(3220);
   assert.equal(snapshot.cursorRenderX, 3);
-  assert.equal(snapshot.cursorRenderY, 4);
+  assert.equal(snapshot.cursorRenderY, 3);
 });
 
 test("rapid cursor commands queue one step until the original move pause ends", () => {
@@ -1595,8 +1666,8 @@ test("a queued swap supersedes movement and waits for the cursor to arrive", () 
   const engine = new CrackAttackEngine({ seed: 20 });
   const internals = harness(engine);
   const board = createEmptyBoard();
-  board[4][3] = block(1, 0);
-  board[4][4] = block(2, 1);
+  board[3][3] = block(1, 0);
+  board[3][4] = block(2, 1);
   internals.board = board;
   internals.status = "playing";
   internals.phase = "idle";
@@ -1610,9 +1681,9 @@ test("a queued swap supersedes movement and waits for the cursor to arrive", () 
   engine.update(1000 + CURSOR_MOVE_DURATION_MS);
   const snapshot = engine.getSnapshot(1120);
   assert.equal(snapshot.cursorX, 3);
-  assert.equal(snapshot.cursorY, 4, "the earlier queued move was discarded");
-  assert.equal((snapshot.board[4][3] as BlockCell).id, 2);
-  assert.equal((snapshot.board[4][4] as BlockCell).id, 1);
+  assert.equal(snapshot.cursorY, 3, "the earlier queued move was discarded");
+  assert.equal((snapshot.board[3][3] as BlockCell).id, 2);
+  assert.equal((snapshot.board[3][4] as BlockCell).id, 1);
   assert.ok(engine.drainEvents().some((event) => event.type === "swap"));
 });
 

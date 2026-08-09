@@ -3,6 +3,22 @@ import type { GameStatus, LoseBarState } from "./engine";
 export type Vector3 = [number, number, number];
 export type Color3 = [number, number, number];
 
+export function swapMotionTransform(
+  fromX: number,
+  toX: number,
+  progress: number,
+): { x: number; rotateY: number; centerZ: number } {
+  const midpoint = (fromX + toX) / 2;
+  const sourceOffset = fromX - midpoint;
+  const angle = Math.PI * Math.max(0, Math.min(1, progress));
+  return {
+    x: midpoint + sourceOffset * Math.cos(angle),
+    rotateY: angle,
+    // One browser cell is two original OpenGL world units.
+    centerZ: -sourceOffset * 2 * Math.sin(angle),
+  };
+}
+
 const LEVEL_LIGHT_BLUE: Color3 = [0.08, 0.1, 1];
 const LEVEL_LIGHT_RED: Color3 = [1, 0.025, 0.055];
 const LEVEL_LIGHT_WHITE: Color3 = [1, 1, 1];

@@ -51,6 +51,7 @@ export type WebGLLitMesh = IndexedLitMesh | PolygonLitMesh;
 export interface WebGLBlockDraw {
   centerX: number;
   centerY: number;
+  centerZ?: number;
   color: Vector3;
   alpha: number;
   scale: number;
@@ -72,6 +73,7 @@ const VERTEX_SHADER = `
 
   uniform vec2 uViewport;
   uniform vec2 uCenter;
+  uniform float uCenterZ;
   uniform vec2 uProjectionCenter;
   uniform vec3 uRotation;
   uniform vec3 uSpinAxis;
@@ -145,7 +147,7 @@ const VERTEX_SHADER = `
       (uProjectionCenter.y - uCenter.y) / uPixelsPerUnit
     );
     vec3 worldPosition = objectPosition
-      + vec3(worldCenter, -uCameraDistance);
+      + vec3(worldCenter, -uCameraDistance + uCenterZ);
 
     float perspective = uCameraDistance / max(1.0, -worldPosition.z);
     vec2 pixel = uProjectionCenter
@@ -155,7 +157,11 @@ const VERTEX_SHADER = `
       1.0 - pixel.y / uViewport.y * 2.0
     );
 
-    gl_Position = vec4(clip, 0.5 - objectPosition.z * 0.012, 1.0);
+    gl_Position = vec4(
+      clip,
+      0.5 - (objectPosition.z + uCenterZ) * 0.012,
+      1.0
+    );
     vObjectY = objectPosition.y;
 
     // Match the original fixed-function OpenGL path: lighting is evaluated at
@@ -398,6 +404,7 @@ export class BlockWebGLLayer {
     ];
     this.configureMoteLights(lightBounds);
     gl.uniform2f(uniforms.uCenter, block.centerX, block.centerY);
+    gl.uniform1f(uniforms.uCenterZ, block.centerZ ?? 0);
     gl.uniform3f(uniforms.uRotation, block.rotateX, block.rotateY, block.rotateZ);
     gl.uniform3f(uniforms.uSpinAxis, spinAxis[0], spinAxis[1], spinAxis[2]);
     gl.uniform1f(uniforms.uSpinAngle, block.spinAngle);
@@ -450,6 +457,7 @@ export class BlockWebGLLayer {
     const uniforms = Object.fromEntries([
       "uViewport",
       "uCenter",
+      "uCenterZ",
       "uProjectionCenter",
       "uRotation",
       "uSpinAxis",

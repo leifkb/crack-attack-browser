@@ -805,9 +805,12 @@ export class CrackAttackEngine {
   private impactSpringY = 0;
   private impactSpringVelocity = 0;
   private cursorX = 2;
-  private cursorY = 4;
+  // The desktop swapper starts at grid y=4. Browser row zero represents the
+  // desktop's playable y=1 (the hidden creep row is stored separately), so
+  // the equivalent initial selection is browser row three.
+  private cursorY = 3;
   private cursorFromX = 2;
-  private cursorFromY = 4;
+  private cursorFromY = 3;
   private cursorMoveStarted: number | null = null;
   private cursorCommandLockedUntil = 0;
   private queuedCursorMove: Coordinate | null = null;
@@ -902,9 +905,9 @@ export class CrackAttackEngine {
     this.impactSpringY = 0;
     this.impactSpringVelocity = 0;
     this.cursorX = 2;
-    this.cursorY = 4;
+    this.cursorY = 3;
     this.cursorFromX = 2;
-    this.cursorFromY = 4;
+    this.cursorFromY = 3;
     this.cursorMoveStarted = null;
     this.cursorCommandLockedUntil = 0;
     this.queuedCursorMove = null;
@@ -1070,6 +1073,7 @@ export class CrackAttackEngine {
       }
     }
 
+    let startedDangerThisTick = false;
     if (this.dangerActive && !inDanger) {
       this.dangerActive = false;
       this.dangerMs = 0;
@@ -1082,6 +1086,7 @@ export class CrackAttackEngine {
       this.dangerMs = 0;
       this.dangerFlashAlarm = LEVEL_LIGHT_DEATH_FLASH_TICKS;
       this.events.push({ type: "danger" });
+      startedDangerThisTick = true;
     }
     this.stepLoseBar(this.dangerActive);
 
@@ -1091,10 +1096,10 @@ export class CrackAttackEngine {
       return;
     }
 
-    // Creep::timeStep only returns early for a safe-height violation or while
-    // blocks are dying/awakening. Swaps, ordinary falls, and garbage drops all
-    // continue alongside the upward pressure.
-    if (!inDanger && !eliminationActive) {
+    // Creep::timeStep arms a safe-height freeze but still creeps on that first
+    // violation tick. It returns early only on later frozen ticks or while
+    // blocks are dying/awakening; other animations do not stop the pressure.
+    if ((!inDanger || startedDangerThisTick) && !eliminationActive) {
       const manualRaiseActive = this.raiseHeld || this.raiseToRowBoundary;
       const rowsPerSecond = creepRowsPerSecond(this.elapsedMs, manualRaiseActive);
       const riseDelta = rowsPerSecond * (delta / 1000);
@@ -2507,19 +2512,16 @@ export class CrackAttackEngine {
     const width = Math.max(1, Math.min(BOARD_COLUMNS, attack.width));
     const height = Math.max(1, Math.min(11, attack.height));
 
-    // GarbageManager stages pieces above the current effective ceiling. Use
-    // each falling group's present interpolated row so several due pieces can
-    // enter and descend together instead of retaining their original ceiling.
+    // GarbageManager stages pieces above the current occupied ceiling. The
+    // desktop grid advances a falling resident's integer row at the beginning
+    // of each three-tick fall segment, so use that row rather than either the
+    // browser's eventual landing reservation or its interpolated visual row.
     let occupiedCeiling = -1;
     for (let y = 0; y < this.board.length; y += 1) {
       for (let column = 0; column < BOARD_COLUMNS; column += 1) {
         const cell = this.board[y][column];
         if (!cell) continue;
-        const currentY = cell.kind === "garbage"
-          && cell.initialFallUntil !== undefined
-          && now < cell.initialFallUntil
-          ? this.motionYAt(cell, y, now)
-          : y;
+        const currentY = this.motionGridY(cell, column, y, now);
         occupiedCeiling = Math.max(occupiedCeiling, currentY);
       }
     }
@@ -2766,6 +2768,22 @@ export class CrackAttackEngine {
     return fromY + (targetY - fromY) * raw;
   }
 
+  private motionGridY(cell: Cell, x: number, targetY: number, now: number): number {
+    if (!this.isVerticalFallMotion(cell, x, targetY, now)) return targetY;
+
+    const started = cell.animationStarted ?? now;
+    const delay = cell.animationDelay ?? 0;
+    const fromY = cell.animationFromY ?? targetY;
+    if (now < started + delay) return Math.max(targetY, Math.ceil(fromY));
+
+    // Block::timeStep and Garbage::timeStep move the resident into the next
+    // grid row on the tick that ends the hang, before drawing the first third
+    // of that row. Browser interpolation deliberately remains smooth and is
+    // one visual increment behind that discrete grid coordinate, hence the
+    // ceil-minus-one conversion at every row boundary.
+    return Math.max(targetY, Math.ceil(this.motionYAt(cell, targetY, now)) - 1);
+  }
+
   private openFallReservation(x: number, y: number, now: number): boolean {
     const stack: Array<{ y: number; cell: BlockCell; visualY: number }> = [];
     let cursorY = y;
@@ -2902,17 +2920,25 @@ export class CrackAttackEngine {
   }
 
   private topOccupiedRow(now: number): number {
-    for (let y = this.board.length - 1; y >= 0; y -= 1) {
-      if (this.board[y].some((cell) => (
-        cell !== null
-        && !(
+    let topRow = -1;
+    for (let y = 0; y < this.board.length; y += 1) {
+      for (let x = 0; x < BOARD_COLUMNS; x += 1) {
+        const cell = this.board[y][x];
+        if (!cell) continue;
+        // Grid::top_effective_row ignores an incoming garbage resident until
+        // its real impact. A provisional landing can be retargeted when its
+        // support vanishes, in which case initialImpactAt carries that state.
+        if (
           cell.kind === "garbage"
-          && cell.initialFallUntil !== undefined
-          && now < cell.initialFallUntil
-        )
-      ))) return y;
+          && (
+            (cell.initialFallUntil !== undefined && now < cell.initialFallUntil)
+            || (cell.initialImpactAt !== undefined && now < cell.initialImpactAt)
+          )
+        ) continue;
+        topRow = Math.max(topRow, this.motionGridY(cell, x, y, now));
+      }
     }
-    return -1;
+    return topRow;
   }
 
   private levelLightBlendAt(index: number, now: number): number {
