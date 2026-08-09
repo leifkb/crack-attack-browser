@@ -121,7 +121,7 @@ test("the WebGL block layer falls back on context loss and rebuilds on restore",
     assert.equal(layer.begin(mesh, [{
       position: [0, 0, -39.5],
       color: [0.4, 0.4, 0.4],
-    }]), true);
+    }], 0.5), true);
     layer.draw({
       centerX: 526,
       centerY: 534,
@@ -135,6 +135,7 @@ test("the WebGL block layer falls back on context loss and rebuilds on restore",
       spinAngle: 0,
     });
     assert.equal(uniforms.get("uMoteLightCount"), 1);
+    assert.equal(uniforms.get("uHeadlightLevel"), 0.5);
     assert.deepEqual(
       (uniforms.get("uMoteLightPositions[0]") as number[]).slice(0, 3),
       [0, 0, -39.5],

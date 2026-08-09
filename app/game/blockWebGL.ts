@@ -82,6 +82,7 @@ const VERTEX_SHADER = `
   uniform float uPixelsPerUnit;
   uniform float uCameraDistance;
   uniform vec3 uLightPosition;
+  uniform float uHeadlightLevel;
   uniform float uMoteLightCount;
   uniform vec3 uMoteLightPositions[7];
   uniform vec3 uMoteLightColors[7];
@@ -178,8 +179,8 @@ const VERTEX_SHADER = `
     float backSpecular = backDiffuse > 0.0
       ? 0.5 * pow(max(dot(-objectNormal, halfDirection), 0.0), 10.0)
       : 0.0;
-    vec3 frontColor = uColor * diffuse + vec3(specular);
-    vec3 backColor = uColor * backDiffuse + vec3(backSpecular);
+    vec3 frontColor = (uColor * diffuse + vec3(specular)) * uHeadlightLevel;
+    vec3 backColor = (uColor * backDiffuse + vec3(backSpecular)) * uHeadlightLevel;
 
     // LightManager.cxx permits seven reward-mote point lights. Blocks use a
     // hand-calculated center-distance fade; garbage additionally enables the
@@ -365,7 +366,11 @@ export class BlockWebGLLayer {
     return this.available && !this.gl.isContextLost();
   }
 
-  begin(mesh: WebGLLitMesh, moteLights: WebGLPointLight[] = []): boolean {
+  begin(
+    mesh: WebGLLitMesh,
+    moteLights: WebGLPointLight[] = [],
+    headlightLevel = 1,
+  ): boolean {
     if (!this.isAvailable() || !this.program) return false;
     const { gl } = this;
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
@@ -373,6 +378,10 @@ export class BlockWebGLLayer {
     gl.clearDepth(1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.useProgram(this.program);
+    gl.uniform1f(
+      this.uniforms.uHeadlightLevel,
+      Math.max(0, Math.min(1, headlightLevel)),
+    );
     this.moteLights = moteLights;
     this.useMesh(mesh);
     return this.isAvailable();
@@ -466,6 +475,7 @@ export class BlockWebGLLayer {
       "uPixelsPerUnit",
       "uCameraDistance",
       "uLightPosition",
+      "uHeadlightLevel",
       "uMoteLightCount",
       "uMoteLightPositions[0]",
       "uMoteLightColors[0]",
