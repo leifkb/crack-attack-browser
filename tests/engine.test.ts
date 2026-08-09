@@ -14,6 +14,7 @@ import {
   CrackAttackEngine,
   DANGER_HIGH_ALERT_MS,
   DANGER_LOSS_DELAY_MS,
+  GAME_OVER_BOARD_FADE_MS,
   GAME_OVER_RESTART_DELAY_MS,
   GARBAGE_QUEUE_CAPACITY,
   GRAY_FLAVOR,
@@ -30,6 +31,7 @@ import {
   createEmptyBoard,
   creepRowsPerSecond,
   deathSparkVisualAt,
+  fallMotionProgress,
   findMatchCoordinates,
   findMatches,
   magnitudeAttacks,
@@ -88,6 +90,12 @@ interface EngineHarness {
   phaseUntil: number;
   rise: number;
   score: number;
+  displayScore: number;
+  previousDisplayScore: number;
+  scoreBacklog: number;
+  scoreFadeTicks: number;
+  scoreFadeInitialTicks: number;
+  impactSpringY: number;
   rewardMotes: RewardMote[];
   rewardSigns: RewardSign[];
   deathSparks: DeathSpark[];
@@ -103,6 +111,12 @@ interface EngineHarness {
   loseBarPhase: "inactive" | "low" | "high" | "fade-low" | "fade-high" | "reset-high";
   loseBarProgress: number;
   loseBarFadeTicks: number;
+  levelLights: Array<{
+    from: number;
+    to: number;
+    startedAt: number;
+    duration: number;
+  }>;
   startClear(
     matches: Coordinate[],
     chainStep: boolean,
@@ -835,6 +849,28 @@ test("a slow frame catches up all original simulation time", () => {
   assert.ok(Math.abs(snapshot.rise - (20 / 1440) * 0.2) < 1e-9);
 });
 
+test("the creep speed clock includes the three-second opening pause", () => {
+  const engine = new CrackAttackEngine({ seed: 0x727374 });
+  const internals = harness(engine);
+  internals.board = createEmptyBoard();
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.elapsedMs = 6980;
+  internals.lastUpdate = 1000;
+  internals.rise = 0;
+
+  engine.update(1020);
+  const beforeAlarm = engine.getSnapshot(1020).rise;
+  assert.ok(Math.abs(beforeAlarm - (20 / 1440) * 0.02) < 1e-12);
+
+  engine.update(1040);
+  const afterAlarm = engine.getSnapshot(1040).rise;
+  assert.ok(
+    Math.abs(afterAlarm - beforeAlarm - (40 / 1440) * 0.02) < 1e-12,
+    "the first 500-tick alarm fires after 351 active-play ticks, at 7.02 seconds",
+  );
+});
+
 test("manual raise keeps accelerating after normal creep passes its original floor", () => {
   assert.equal(creepRowsPerSecond(0, false), 20 / 1440);
   assert.equal(creepRowsPerSecond(0, true), 2.5);
@@ -929,6 +965,32 @@ test("occupied level lights fade from blue through purple on the original cadenc
   const complete = engine.getSnapshot(100 + LEVEL_LIGHT_FADE_MS);
   assert.equal(complete.levelLightBlends[0], 1);
   assert.equal(complete.levelLightBlends[complete.topOccupiedRow], 1);
+});
+
+test("a new run fades level lights from the completed board instead of blue", () => {
+  const engine = new CrackAttackEngine({ seed: 0x575656 });
+  const internals = harness(engine);
+  internals.status = "gameover";
+  internals.gameOverAt = 0;
+  internals.levelLights = Array.from({ length: VISIBLE_ROWS }, () => ({
+    from: 1,
+    to: 1,
+    startedAt: 0,
+    duration: 0,
+  }));
+
+  const restartedAt = GAME_OVER_RESTART_DELAY_MS;
+  assert.equal(engine.start(restartedAt, 0x585656), true);
+  let snapshot = engine.getSnapshot(restartedAt);
+  assert.ok(snapshot.levelLightBlends.every((blend) => blend === 1));
+
+  snapshot = engine.getSnapshot(restartedAt + LEVEL_LIGHT_FADE_MS / 2);
+  assert.equal(snapshot.levelLightBlends[snapshot.topOccupiedRow], 1);
+  assert.equal(
+    snapshot.levelLightBlends[snapshot.topOccupiedRow + 1],
+    0.5,
+    "only rows above the new stack fade back toward blue",
+  );
 });
 
 test("an elimination delays a new danger alarm and an active light flash keeps stepping", () => {
@@ -1295,6 +1357,86 @@ test("a block swapped over a hole falls before an unrelated clear finishes", () 
   assert.equal(falling.animationDuration, 120, "a one-row fall takes 60ms after the hang");
 });
 
+test("falling visuals take their first third-step on the source tick", () => {
+  const hanging = block(510, 2);
+  hanging.animationFromX = 2;
+  hanging.animationFromY = 1;
+  hanging.animationStarted = 1000;
+  hanging.animationDelay = 60;
+  hanging.animationDuration = 120;
+
+  assert.equal(fallMotionProgress(hanging, 2, 0, 1040), 0);
+  assert.ok(Math.abs((fallMotionProgress(hanging, 2, 0, 1060) ?? 0) - 1 / 3) < 1e-12);
+  assert.ok(Math.abs((fallMotionProgress(hanging, 2, 0, 1080) ?? 0) - 2 / 3) < 1e-12);
+  assert.equal(fallMotionProgress(hanging, 2, 0, 1100), 1);
+  assert.equal(fallMotionProgress(hanging, 2, 0, 1120), 1);
+
+  const immediate = block(511, 3);
+  immediate.animationFromX = 2;
+  immediate.animationFromY = 1;
+  immediate.animationStarted = 1000;
+  immediate.animationDelay = 0;
+  immediate.animationDuration = 60;
+  assert.ok(Math.abs((fallMotionProgress(immediate, 2, 0, 1000) ?? 0) - 1 / 3) < 1e-12);
+  assert.ok(Math.abs((fallMotionProgress(immediate, 2, 0, 1020) ?? 0) - 2 / 3) < 1e-12);
+  assert.equal(fallMotionProgress(immediate, 2, 0, 1040), 1);
+});
+
+test("a one-row hanging block keeps its reserved landing cell unswappable", () => {
+  const engine = new CrackAttackEngine({ seed: 0x929191 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  const falling = block(512, 2);
+  falling.animationFromX = 2;
+  falling.animationFromY = 1;
+  falling.animationStarted = 1000;
+  falling.animationDelay = 60;
+  falling.animationDuration = 120;
+  board[0][2] = falling;
+  board[0][3] = block(513, 3);
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "falling";
+  internals.phaseUntil = 1120;
+  internals.backgroundFallUntil = 1120;
+  internals.lastUpdate = 1000;
+
+  engine.setCursor(2, 0, 1000);
+  assert.equal(engine.swap(1000), false);
+  assert.equal(
+    engine.swap(1060),
+    false,
+    "Swapper runs before the resident leaves its hanging source row on this tick",
+  );
+});
+
+test("an empty target above a falling resident remains unswappable", () => {
+  const engine = new CrackAttackEngine({ seed: 0x939191 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  const falling = block(514, 2);
+  falling.animationFromX = 2;
+  falling.animationFromY = 1;
+  falling.animationStarted = 1000;
+  falling.animationDelay = 0;
+  falling.animationDuration = 60;
+  board[0][2] = falling;
+  board[2][3] = block(515, 3);
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "falling";
+  internals.phaseUntil = 1060;
+  internals.backgroundFallUntil = 1060;
+  internals.lastUpdate = 1000;
+
+  engine.setCursor(2, 2, 1000);
+  assert.equal(
+    engine.swap(1000),
+    false,
+    "the final-cell reservation must not hide the falling source row below",
+  );
+});
+
 test("a quick swap can fill a falling stack's path and create a combo", () => {
   const engine = new CrackAttackEngine({ seed: 0xa1a1a1 });
   const internals = harness(engine);
@@ -1622,6 +1764,30 @@ test("a quick raise tap commits the stack to the next complete row", () => {
   );
 });
 
+test("pausing does not cancel a manually committed creep row", () => {
+  const engine = new CrackAttackEngine({ seed: 12 });
+  engine.start(100);
+  engine.update(100 + COUNTDOWN_START_DELAY_MS);
+  const initialCursor = engine.getSnapshot(3100).cursorY;
+
+  engine.setRaiseHeld(true);
+  engine.update(3120);
+  assert.ok(engine.getSnapshot(3120).rise > 0);
+  engine.togglePause(3120);
+  engine.setRaiseHeld(false);
+  engine.togglePause(4120);
+
+  let now = 4120;
+  let snapshot = engine.getSnapshot(now);
+  while (snapshot.cursorY === initialCursor && now < 5120) {
+    now += 20;
+    engine.update(now);
+    snapshot = engine.getSnapshot(now);
+  }
+  assert.equal(snapshot.cursorY, initialCursor + 1);
+  assert.equal(snapshot.rise, 0, "Creep::advance survives pause and finishes at the boundary");
+});
+
 test("cursor movement glides with the original quadratic timing", () => {
   const engine = new CrackAttackEngine({ seed: 17 });
   engine.start(100);
@@ -1705,13 +1871,74 @@ test("score display rolls through earned points on the desktop cadence", () => {
   assert.equal(snapshot.displayScore, 0, "the HUD starts with the old digits");
 
   engine.update(1020);
-  assert.equal(engine.getSnapshot(1020).displayScore, 1);
+  snapshot = engine.getSnapshot(1020);
+  assert.equal(snapshot.displayScore, 1);
+  assert.equal(snapshot.previousDisplayScore, 0);
+  assert.equal(snapshot.scoreFadeProgress, 0);
+  engine.update(1120);
+  snapshot = engine.getSnapshot(1120);
+  assert.equal(snapshot.displayScore, 1);
+  assert.equal(snapshot.scoreFadeProgress, 0.5);
   engine.update(1220);
   assert.equal(engine.getSnapshot(1220).displayScore, 1, "the fade delay holds the old digit");
   engine.update(1240);
   snapshot = engine.getSnapshot(1240);
   assert.equal(snapshot.displayScore, 2);
+  assert.equal(snapshot.previousDisplayScore, 1);
+  assert.equal(snapshot.scoreFadeProgress, 0);
   assert.equal(snapshot.score, 2);
+});
+
+test("game over records only the score rolled in by its final play tick", () => {
+  const engine = new CrackAttackEngine({ seed: 22 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  board[VISIBLE_ROWS - 1][0] = block(10, 1);
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.lastUpdate = 1000;
+  internals.dangerActive = true;
+  internals.dangerMs = DANGER_LOSS_DELAY_MS - 20;
+  internals.score = 6;
+  internals.displayScore = 2;
+  internals.previousDisplayScore = 1;
+  internals.scoreBacklog = 4;
+  internals.scoreFadeTicks = 0;
+  internals.scoreFadeInitialTicks = 0;
+
+  engine.update(1020);
+  let snapshot = engine.getSnapshot(1020);
+  assert.equal(snapshot.status, "gameover");
+  assert.equal(snapshot.displayScore, 3, "Score receives the loss tick before gameFinish");
+  assert.equal(snapshot.previousDisplayScore, 2);
+  assert.equal(snapshot.score, 3, "unrolled points are not flushed into the record");
+  assert.equal(internals.scoreBacklog, 0);
+  assert.equal(snapshot.scoreFadeProgress, 0);
+
+  snapshot = engine.getSnapshot(1080);
+  assert.equal(snapshot.scoreFadeProgress, 0.5, "the final digit fade continues on meta ticks");
+});
+
+test("game over freezes board and cursor clocks while the meta scene advances", () => {
+  const engine = new CrackAttackEngine({ seed: 23 });
+  const internals = harness(engine);
+  internals.status = "playing";
+  engine.moveCursor(1, 0, 1000);
+  internals.phase = "swapping";
+  internals.phaseUntil = 1120;
+  internals.status = "gameover";
+  internals.gameOverAt = 1060;
+
+  const finalTick = engine.getSnapshot(1060);
+  const later = engine.getSnapshot(1060 + GAME_OVER_BOARD_FADE_MS);
+  assert.equal(GAME_OVER_RESTART_DELAY_MS, 3880);
+  assert.equal(GAME_OVER_BOARD_FADE_MS, 4000);
+  assert.equal(later.visualNow, 5060);
+  assert.equal(later.boardVisualNow, 1060);
+  assert.equal(later.cursorRenderX, finalTick.cursorRenderX);
+  assert.equal(later.cursorRenderY, finalTick.cursorRenderY);
+  assert.equal(later.swapProgress, finalTick.swapProgress);
 });
 
 test("the cursor moves during the opening countdown while swapping stays locked", () => {
@@ -1837,6 +2064,9 @@ test("alternating full-width garbage rows sometimes reform instead of becoming b
   for (let y = 2; y <= 3; y += 1) {
     for (let x = 0; x < BOARD_COLUMNS; x += 1) {
       const cell = garbage(id++, 80);
+      cell.texture = 2;
+      cell.decalX = 2;
+      cell.decalY = 1;
       cell.state = "shattering";
       cell.clearStarted = 1000;
       cell.clearUntil = 1000 + AWAKEN_INITIAL_DELAY_MS;
@@ -1873,6 +2103,14 @@ test("alternating full-width garbage rows sometimes reform instead of becoming b
       (cell as GarbageCell).awakenSource === "normal"
     )),
     "the retained row remembers the old shell color for its section-pop animation",
+  );
+  assert.ok(
+    snapshot.board[3].every((cell) => (
+      (cell as GarbageCell).texture === null
+      && (cell as GarbageCell).decalX === undefined
+      && (cell as GarbageCell).decalY === undefined
+    )),
+    "the reformed resident releases the old shell's flavor-image association",
   );
 });
 
@@ -2141,6 +2379,22 @@ test("reward signs retain the desktop lifetime, collision slots, motion, and cap
   assert.equal(internals.rewardSigns.length, 25);
 });
 
+test("transient effects capture both creep and impact-spring offsets", () => {
+  const engine = new CrackAttackEngine({ seed: 0x919293 });
+  const internals = harness(engine);
+  internals.random = () => 0.5;
+  internals.rise = 0.25;
+  internals.impactSpringY = 1;
+
+  internals.createRewardSign("magnitude", 4, { x: 0, y: 0 }, 1000);
+  internals.createRewardMote("magnitude", { x: 2, y: 3 }, 0, 1000, 0);
+  internals.createBlockDeathSparks(2, 3, 4, 1, 1000);
+
+  assert.equal(internals.rewardSigns[0].y, 1.25);
+  assert.equal(internals.rewardMotes[0].y, 4.25);
+  assert.equal(internals.deathSparks[0].y, 4.25);
+});
+
 test("death sparks use desktop drag, gravity, lifetimes, pulse, and uncapped clear counts", () => {
   const spark: DeathSpark = {
     id: 1,
@@ -2262,14 +2516,15 @@ test("the lose bar fades out from both alerts and eases a reset high alert", () 
   restart.gameOverAt = 0;
   restart.loseBarPhase = "high";
   restart.loseBarProgress = 1;
-  assert.equal(restartEngine.start(2000, 0x9fa0a1), true);
-  assert.deepEqual(restartEngine.getSnapshot(2000).loseBar, {
+  const restartedAt = GAME_OVER_RESTART_DELAY_MS;
+  assert.equal(restartEngine.start(restartedAt, 0x9fa0a1), true);
+  assert.deepEqual(restartEngine.getSnapshot(restartedAt).loseBar, {
     phase: "fade-high",
     progress: 1,
     fade: 1,
   });
-  restartEngine.update(2000 + COUNTDOWN_START_DELAY_MS);
-  assert.deepEqual(restartEngine.getSnapshot(5000).loseBar, {
+  restartEngine.update(restartedAt + COUNTDOWN_START_DELAY_MS);
+  assert.deepEqual(restartEngine.getSnapshot(restartedAt + COUNTDOWN_START_DELAY_MS).loseBar, {
     phase: "fade-high",
     progress: 1,
     fade: (LOSE_BAR_FADE_TICKS - 1) / LOSE_BAR_FADE_TICKS,
