@@ -67,6 +67,12 @@ export function playfieldVisible(status: GameStatus): boolean {
   return status !== "ready" && status !== "paused";
 }
 
+export function swapperVisible(status: GameStatus): boolean {
+  // The loss celebration redraws the final gameplay tick, including Swapper.
+  // Pause and the initial key-wait screen are the only states that omit it.
+  return status === "countdown" || status === "playing" || status === "gameover";
+}
+
 export interface BlockMaterialVisual {
   color: Color3;
   alpha: number;
@@ -309,6 +315,25 @@ export interface LoseBarVisual {
 
 export function formatSoloScore(score: number): string {
   return Math.max(0, Math.floor(score)).toString().padStart(4, "0").slice(-7);
+}
+
+export interface ScoreDigitTransition {
+  current: string;
+  previous: string;
+  progress: number;
+}
+
+export function scoreDigitTransition(
+  currentScore: number,
+  previousScore: number,
+  progress: number,
+): ScoreDigitTransition {
+  let current = formatSoloScore(currentScore);
+  let previous = formatSoloScore(previousScore);
+  const width = Math.max(current.length, previous.length);
+  current = current.padStart(width, "0");
+  previous = previous.padStart(width, "0");
+  return { current, previous, progress: clamp(progress) };
 }
 
 export interface LoseBarTone {

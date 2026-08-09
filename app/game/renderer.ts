@@ -9,9 +9,11 @@ import {
   AWAKEN_INTERNAL_DELAY_MS,
   AWAKEN_POP_DURATION_MS,
   BOARD_COLUMNS,
+  GAME_OVER_BOARD_FADE_MS,
   REWARD_MOTE_PALETTE,
   VISIBLE_ROWS,
   deathSparkVisualAt,
+  fallMotionProgress,
   rewardMoteVisualAt,
   rewardSignVisualAt,
   type BlockCell,
@@ -36,7 +38,6 @@ import {
   countdownVisual,
   createGarbageMesh,
   doubleTriangularFlash,
-  formatSoloScore,
   gameOverMaskBounds,
   gameOverCenterY,
   garbageShatterVisual,
@@ -47,7 +48,9 @@ import {
   messagePulseAlpha,
   playfieldVisible,
   retainedGarbageVisual,
+  scoreDigitTransition,
   swapMotionTransform,
+  swapperVisible,
   type Color3,
   type GarbageMesh,
 } from "./renderGeometry";
@@ -428,11 +431,12 @@ function motionPosition(
 
   const delay = cell.animationDelay ?? 0;
   const travelDuration = Math.max(1, cell.animationDuration - delay);
-  const rawProgress = clamp(
-    (now - cell.animationStarted - delay) / travelDuration,
-  );
   const fromX = cell.animationFromX ?? x;
   const fromY = cell.animationFromY ?? y;
+  const verticalFall = fromX === x && fromY > y && cell.state === "idle";
+  const rawProgress = verticalFall
+    ? fallMotionProgress(cell, x, y, now) ?? 0
+    : clamp((now - cell.animationStarted - delay) / travelDuration);
   const horizontalSwap = fromX !== x && fromY === y && cell.state === "idle";
   if (horizontalSwap) {
     // DrawBlocks.cxx rotates both residents 180 degrees around their shared
@@ -448,7 +452,6 @@ function motionPosition(
   }
   // Original Crack Attack falling advances at a constant per-tick velocity;
   // retain easing for any other non-fall motion.
-  const verticalFall = fromX === x && fromY > y && cell.state === "idle";
   const progress = verticalFall ? rawProgress : easeOutCubic(rawProgress);
   return {
     x: fromX + (x - fromX) * progress,
@@ -826,7 +829,11 @@ function drawHud(
 ): void {
   drawLoseBar(context, snapshot.loseBar);
   const hudCenterX = 182;
-  const score = formatSoloScore(snapshot.displayScore);
+  const score = scoreDigitTransition(
+    snapshot.displayScore,
+    snapshot.previousDisplayScore,
+    snapshot.scoreFadeProgress,
+  );
   const scoreSize = 44;
   drawSparkle(
     context,
@@ -839,14 +846,29 @@ function drawHud(
     1,
     4,
   );
-  drawSpriteText(
-    context,
-    assets,
-    score,
-    hudCenterX - measureSpriteText(score, scoreSize) / 2,
-    670,
-    scoreSize,
-  );
+  const scoreX = hudCenterX - measureSpriteText(score.current, scoreSize) / 2;
+  const digitAdvance = scoreSize * (5 / 6);
+  for (let index = 0; index < score.current.length; index += 1) {
+    const currentDigit = score.current[index];
+    const previousDigit = score.previous[index];
+    const x = scoreX + index * digitAdvance;
+    if (currentDigit === previousDigit || score.progress >= 1) {
+      drawSpriteText(context, assets, currentDigit, x, 670, scoreSize);
+      continue;
+    }
+    if (score.progress < 1) {
+      context.save();
+      context.globalAlpha = 1 - score.progress;
+      drawSpriteText(context, assets, previousDigit, x, 670, scoreSize);
+      context.restore();
+    }
+    if (score.progress > 0) {
+      context.save();
+      context.globalAlpha = score.progress;
+      drawSpriteText(context, assets, currentDigit, x, 670, scoreSize);
+      context.restore();
+    }
+  }
 
   context.fillStyle = "rgba(116, 112, 223, .52)";
   context.font = "600 11px ui-monospace, SFMono-Regular, Menlo, monospace";
@@ -2091,7 +2113,7 @@ function drawSwapperMesh(
 }
 
 function drawCursor(context: CanvasRenderingContext2D, snapshot: GameSnapshot): void {
-  if (snapshot.status !== "playing" && snapshot.status !== "countdown") return;
+  if (!swapperVisible(snapshot.status)) return;
   const position = logicalToScreen(
     snapshot.cursorRenderX,
     snapshot.cursorRenderY,
@@ -2344,7 +2366,8 @@ export function drawGame(
     frameContext = frameCanvas.getContext("2d");
   }
   const target = frameContext ?? context;
-  const now = snapshot.visualNow;
+  const effectNow = snapshot.visualNow;
+  const boardNow = snapshot.boardVisualNow;
   target.setTransform(1, 0, 0, 1, 0, 0);
   target.globalAlpha = 1;
   target.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
@@ -2365,12 +2388,12 @@ export function drawGame(
       target.clip();
 
       const garbageGroups = collectGarbage(snapshot);
-      const moteLights = rewardMotePointLights(snapshot, now);
+      const moteLights = rewardMotePointLights(snapshot, effectNow);
       const usedWebGL = drawWebGLBlocks(
         target,
         snapshot,
         assets,
-        now,
+        boardNow,
         garbageGroups,
         moteLights,
       );
@@ -2388,7 +2411,7 @@ export function drawGame(
             assets,
             position.x,
             position.y,
-            now,
+            boardNow,
             true,
             moteLights,
           );
@@ -2397,7 +2420,7 @@ export function drawGame(
         for (const group of garbageGroups) {
           if (group.state === "shattering") {
             for (const { x, y, cell } of group.positions) {
-              const motion = motionPosition(cell, x, y, now);
+              const motion = motionPosition(cell, x, y, boardNow);
               const position = logicalToScreen(
                 motion.x,
                 motion.y,
@@ -2406,7 +2429,7 @@ export function drawGame(
               if (cell.shatterReforms) {
                 drawBlockVisual(
                   target,
-                  shatteringRetainedSectionVisual(cell, now),
+                  shatteringRetainedSectionVisual(cell, boardNow),
                   assets,
                   position.x,
                   position.y,
@@ -2420,7 +2443,7 @@ export function drawGame(
                   assets,
                   position.x,
                   position.y,
-                  now,
+                  boardNow,
                   false,
                   moteLights,
                 );
@@ -2431,13 +2454,13 @@ export function drawGame(
             && group.awakenReleaseAt !== undefined
           ) {
             const retained = retainedGarbageVisual(
-              now,
+              boardNow,
               group.awakenReleaseAt,
               Math.max(1, new Set(group.positions.map(({ y }) => y)).size),
               AWAKEN_FINAL_DELAY_MS,
             );
             for (const { x, y, cell } of group.positions) {
-              const motion = motionPosition(cell, x, y, now);
+              const motion = motionPosition(cell, x, y, boardNow);
               const position = logicalToScreen(
                 motion.x,
                 motion.y,
@@ -2447,10 +2470,10 @@ export function drawGame(
                 target,
                 retainedGarbageSectionVisual(
                   cell.awakenSource ?? "normal",
-                  cell.awakenRevealAt ?? now,
+                  cell.awakenRevealAt ?? boardNow,
                   cell.awakenPopDirection ?? cell.awakenSequence ?? 0,
                   retained.sectionCompression,
-                  now,
+                  boardNow,
                 ),
                 assets,
                 position.x,
@@ -2466,7 +2489,7 @@ export function drawGame(
           for (let x = 0; x < BOARD_COLUMNS; x += 1) {
             const cell = snapshot.board[y][x];
             if (cell?.kind !== "block") continue;
-            const motion = motionPosition(cell, x, y, now);
+            const motion = motionPosition(cell, x, y, boardNow);
             const position = logicalToScreen(
               motion.x,
               motion.y,
@@ -2478,7 +2501,7 @@ export function drawGame(
               assets,
               position.x,
               position.y,
-              now,
+              boardNow,
               false,
               moteLights,
               motion,
@@ -2494,7 +2517,7 @@ export function drawGame(
           - Math.max(...left.positions.map(({ y }) => y))
       ));
       for (const group of garbagePaintOrder) {
-        drawGarbage(target, group, snapshot, assets, now, !usedWebGL, moteLights);
+        drawGarbage(target, group, snapshot, assets, boardNow, !usedWebGL, moteLights);
       }
       target.restore();
 
@@ -2513,7 +2536,9 @@ export function drawGame(
           BOARD_HEIGHT,
           CELL_SIZE,
         );
-        target.fillStyle = `rgba(0, 0, 0, ${clamp(snapshot.gameOverElapsedMs / 1000)})`;
+        target.fillStyle = `rgba(0, 0, 0, ${
+          clamp(snapshot.gameOverElapsedMs / GAME_OVER_BOARD_FADE_MS)
+        })`;
         target.fillRect(mask.x, mask.y, mask.width, mask.height);
       }
     }

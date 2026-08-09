@@ -23,7 +23,9 @@ import {
   messagePulseAlpha,
   playfieldVisible,
   retainedGarbageVisual,
+  scoreDigitTransition,
   swapMotionTransform,
+  swapperVisible,
 } from "../app/game/renderGeometry.ts";
 import { scoreToBeat } from "../app/game/highScore.ts";
 
@@ -359,6 +361,11 @@ test("pause omits the board and swapper while retaining the surrounding scene", 
   assert.equal(playfieldVisible("countdown"), true);
   assert.equal(playfieldVisible("playing"), true);
   assert.equal(playfieldVisible("gameover"), true);
+  assert.equal(swapperVisible("ready"), false);
+  assert.equal(swapperVisible("paused"), false);
+  assert.equal(swapperVisible("countdown"), true);
+  assert.equal(swapperVisible("playing"), true);
+  assert.equal(swapperVisible("gameover"), true);
 });
 
 test("the lose bar highlight peaks in the upper third without changing its material colors", () => {
@@ -380,6 +387,11 @@ test("solo scores use the original four-to-seven visible digits", () => {
   assert.equal(formatSoloScore(10000), "10000");
   assert.equal(formatSoloScore(1234567), "1234567");
   assert.equal(formatSoloScore(12345678), "2345678");
+  assert.deepEqual(scoreDigitTransition(10_000, 9_999, 0.5), {
+    current: "10000",
+    previous: "09999",
+    progress: 0.5,
+  });
 });
 
 test("the opening target advances beyond the original 600-point default", () => {

@@ -25,8 +25,12 @@ export const AWAKEN_POP_DURATION_MS = 240;
 export const CURSOR_MOVE_DURATION_MS = 120;
 export const COUNTDOWN_SEGMENT_MS = 50 * 20;
 export const COUNTDOWN_START_DELAY_MS = 150 * 20;
-// Keep the final score visible through the Game Over graphic's first landing.
-export const GAME_OVER_RESTART_DELAY_MS = 1500;
+// CelebrationManager's loss sign reaches its final resting state after 194
+// meta ticks. Until then, the original ignores input that would leave the
+// celebration screen.
+export const GAME_OVER_RESTART_DELAY_MS = 194 * 20;
+// CelebrationManager dims the frozen playfield over 200 meta ticks.
+export const GAME_OVER_BOARD_FADE_MS = 200 * 20;
 // Crack Attack advances at 50 Hz and keeps dying blocks alive for 90 ticks.
 export const BLOCK_CLEAR_DURATION_MS = 90 * 20;
 export const DANGER_LOSS_DELAY_MS = 7000;
@@ -52,6 +56,9 @@ export const LOSE_BAR_FADE_TICKS = 20;
 // The original simulation consumes every elapsed 20 ms tick. Rendering may
 // skip frames, but gameplay time is never discarded when a frame is late.
 const SIMULATION_STEP_MS = 20;
+// Game::time_step advances throughout the 150-tick opening pause. Creep's
+// first speed alarm is therefore already 149 ticks old when play begins.
+const CREEP_GAME_CLOCK_OFFSET_MS = COUNTDOWN_START_DELAY_MS - SIMULATION_STEP_MS;
 // Original 50 Hz timing: three ticks hanging, then three ticks per row.
 const FALL_HANG_MS = 60;
 const FALL_ROW_MS = 60;
@@ -546,6 +553,8 @@ export interface GameSnapshot {
   phase: Phase;
   score: number;
   displayScore: number;
+  previousDisplayScore: number;
+  scoreFadeProgress: number;
   elapsedMs: number;
   rise: number;
   impactOffsetRows: number;
@@ -577,6 +586,7 @@ export interface GameSnapshot {
   nextAwakeningMs: number | null;
   pausedElapsedMs: number;
   visualNow: number;
+  boardVisualNow: number;
 }
 
 type Phase = "idle" | "swapping" | "clearing" | "falling" | "garbage";
@@ -752,6 +762,42 @@ export function creepRowsPerSecond(elapsedMs: number, manualRaise: boolean): num
   return timerStep / 1440;
 }
 
+/**
+ * Return the current-tick interpolation fraction for an original vertical
+ * fall, or null when the motion is not a fall. Crack Attack moves a resident
+ * one third of a row on the tick that ends its hang (and immediately for a
+ * no-hang fall), then leaves it visually settled for one tick before landing.
+ */
+export function fallMotionProgress(
+  cell: Cell,
+  x: number,
+  targetY: number,
+  now: number,
+  includeCurrentStep = true,
+): number | null {
+  const started = cell.animationStarted;
+  const duration = cell.animationDuration;
+  const fromX = cell.animationFromX ?? x;
+  const fromY = cell.animationFromY ?? targetY;
+  if (
+    started === undefined
+    || duration === undefined
+    || fromX !== x
+    || fromY <= targetY
+    || cell.state !== "idle"
+  ) return null;
+  if (now >= started + duration) return 1;
+
+  const delay = cell.animationDelay ?? 0;
+  if (now < started + delay) return 0;
+  const travelDuration = Math.max(1, duration - delay);
+  const stepLead = includeCurrentStep ? SIMULATION_STEP_MS : 0;
+  return Math.max(
+    0,
+    Math.min(1, (now - started - delay + stepLead) / travelDuration),
+  );
+}
+
 export function magnitudeAttacks(
   magnitude: number,
   createdAt: number,
@@ -798,8 +844,10 @@ export class CrackAttackEngine {
   private gameOverAt = 0;
   private score = 0;
   private displayScore = 0;
+  private previousDisplayScore = 0;
   private scoreBacklog = 0;
   private scoreFadeTicks = 0;
+  private scoreFadeInitialTicks = 0;
   private elapsedMs = 0;
   private rise = 0;
   private impactSpringY = 0;
@@ -898,8 +946,10 @@ export class CrackAttackEngine {
     this.gameOverAt = 0;
     this.score = 0;
     this.displayScore = 0;
+    this.previousDisplayScore = 0;
     this.scoreBacklog = 0;
     this.scoreFadeTicks = 0;
+    this.scoreFadeInitialTicks = 0;
     this.elapsedMs = 0;
     this.rise = 0;
     this.impactSpringY = 0;
@@ -960,6 +1010,9 @@ export class CrackAttackEngine {
       if (now - this.gameOverAt < GAME_OVER_RESTART_DELAY_MS) return false;
       const priorLoseBarPhase = this.loseBarPhase;
       const priorLoseBarProgress = this.loseBarProgress;
+      const priorLevelLightBlends = this.levelLights.map((_, index) => (
+        this.levelLightBlendAt(index, now)
+      ));
       this.reset(resetSeed);
       // LoseBar::gameStart keeps the completed game's alert colors through
       // the opening countdown, then fades them over the first 20 play ticks.
@@ -972,6 +1025,15 @@ export class CrackAttackEngine {
         this.loseBarProgress = priorLoseBarProgress;
         this.loseBarFadeTicks = LOSE_BAR_FADE_TICKS;
       }
+      // LevelLights::initialize runs once at program launch, not once per
+      // game. Preserve the completed game's colors so gameStart can fade only
+      // the rows whose new occupancy target differs.
+      this.levelLights = priorLevelLightBlends.map((blend) => ({
+        from: blend,
+        to: blend,
+        startedAt: now,
+        duration: 0,
+      }));
     } else if (resetSeed !== undefined) {
       // The ready screen already owns an initial board so deterministic engine
       // tests can inspect it. A real run may still provide a fresh wall-clock
@@ -1091,6 +1153,10 @@ export class CrackAttackEngine {
     this.stepLoseBar(this.dangerActive);
 
     if (this.dangerMs >= DANGER_LOSS_DELAY_MS) {
+      // Creep reports the loss in the middle of Game::idlePlay. Score still
+      // receives its normal play tick before Score::gameFinish records the
+      // result, so at most one queued point can enter the final score here.
+      this.stepDisplayedScore();
       this.finishGame(now);
       this.stepImpactSpring();
       return;
@@ -1101,7 +1167,10 @@ export class CrackAttackEngine {
     // blocks are dying/awakening; other animations do not stop the pressure.
     if ((!inDanger || startedDangerThisTick) && !eliminationActive) {
       const manualRaiseActive = this.raiseHeld || this.raiseToRowBoundary;
-      const rowsPerSecond = creepRowsPerSecond(this.elapsedMs, manualRaiseActive);
+      const rowsPerSecond = creepRowsPerSecond(
+        this.elapsedMs + CREEP_GAME_CLOCK_OFFSET_MS,
+        manualRaiseActive,
+      );
       const riseDelta = rowsPerSecond * (delta / 1000);
 
       // Releasing Raise commits the already-started movement through the next
@@ -1200,8 +1269,8 @@ export class CrackAttackEngine {
     const y = this.cursorY;
     const leftCell = this.board[y]?.[x] ?? null;
     const rightCell = this.board[y]?.[x + 1] ?? null;
-    const leftIsFallReservation = this.isFallReservation(leftCell, x, y, now);
-    const rightIsFallReservation = this.isFallReservation(rightCell, x + 1, y, now);
+    const leftIsFallReservation = this.isOpenFallReservation(leftCell, x, y, now);
+    const rightIsFallReservation = this.isOpenFallReservation(rightCell, x + 1, y, now);
     const left = leftIsFallReservation ? null : leftCell;
     const right = rightIsFallReservation ? null : rightCell;
 
@@ -1210,6 +1279,13 @@ export class CrackAttackEngine {
     if (left?.state !== undefined && left.state !== "idle") return false;
     if (right?.state !== undefined && right.state !== "idle") return false;
     if (this.cellIsMoving(left, now) || this.cellIsMoving(right, now)) return false;
+
+    // An empty grid location is immutable while a falling resident occupies
+    // the row below it or a newly hanging resident occupies the row above it.
+    // Gravity's final-cell reservations hide those source rows in this port,
+    // so reconstruct the original pre-resident-step grid before swapping.
+    if (!left && !this.emptySwapTargetAllowed(x, y, now)) return false;
+    if (!right && !this.emptySwapTargetAllowed(x + 1, y, now)) return false;
 
     // Gravity stores a falling stack in its eventual landing cells while the
     // renderer interpolates it from above. The original leaves those cells
@@ -1260,8 +1336,9 @@ export class CrackAttackEngine {
       this.statusBeforePause = this.status;
       this.status = "paused";
       this.pausedAt = now;
-      this.raiseHeld = false;
-      this.raiseToRowBoundary = false;
+      // Controller keeps both the physical Raise state and Creep::advance
+      // through a pause. A key-up or pointer cancellation while paused still
+      // clears raiseHeld, but the already-committed row remains committed.
       return;
     }
     if (this.status === "paused") {
@@ -1289,6 +1366,10 @@ export class CrackAttackEngine {
 
   getSnapshot(now: number): GameSnapshot {
     const visualNow = this.status === "paused" ? this.pausedAt : now;
+    // Displayer::displayMeta temporarily restores the final gameplay tick when
+    // drawing the board. Candy, score fades, level lights, and the loss message
+    // keep advancing on the meta clock, but blocks and the swapper stay frozen.
+    const boardVisualNow = this.status === "gameover" ? this.gameOverAt : visualNow;
     let countdown: GameSnapshot["countdown"] = null;
     let countdownProgress = 0;
     if (this.status === "countdown") {
@@ -1315,11 +1396,15 @@ export class CrackAttackEngine {
       countdown = "GO!";
       countdownProgress = (visualNow - this.countdownUntil) / COUNTDOWN_SEGMENT_MS;
     }
-    if (this.status !== "ready") this.syncLevelLights(visualNow);
+    if (this.status !== "ready") this.syncLevelLights(visualNow, boardVisualNow);
     const activeMessage = visualNow < this.messageUntil ? this.message : null;
     const awakeningCount = this.awakeningCount();
     const nextAwakeningAt = this.nextAwakeningReleaseAt();
-    const cursor = this.cursorVisualPosition(visualNow);
+    const cursor = this.cursorVisualPosition(boardVisualNow);
+    const scoreFadeTicks = this.scoreFadeTicksAt(visualNow);
+    const scoreFadeProgress = this.scoreFadeInitialTicks > 0
+      ? 1 - scoreFadeTicks / this.scoreFadeInitialTicks
+      : 1;
     return {
       board: this.board,
       nextRow: this.nextRow,
@@ -1327,6 +1412,8 @@ export class CrackAttackEngine {
       phase: this.phase,
       score: this.score,
       displayScore: this.displayScore,
+      previousDisplayScore: this.previousDisplayScore,
+      scoreFadeProgress: Math.max(0, Math.min(1, scoreFadeProgress)),
       elapsedMs: this.elapsedMs,
       rise: this.rise,
       impactOffsetRows: this.impactSpringY / WORLD_UNITS_PER_ROW,
@@ -1335,15 +1422,21 @@ export class CrackAttackEngine {
       cursorRenderX: cursor.x,
       cursorRenderY: cursor.y,
       swapProgress: this.phase === "swapping"
-        ? Math.max(0, Math.min(1, 1 - (this.phaseUntil - visualNow) / SWAP_DURATION_MS))
-        : visualNow < this.backgroundSwapUntil
+        ? Math.max(
+          0,
+          Math.min(1, 1 - (this.phaseUntil - boardVisualNow) / SWAP_DURATION_MS),
+        )
+        : boardVisualNow < this.backgroundSwapUntil
           ? Math.max(
             0,
-            Math.min(1, (visualNow - this.backgroundSwapStarted) / SWAP_DURATION_MS),
+            Math.min(
+              1,
+              (boardVisualNow - this.backgroundSwapStarted) / SWAP_DURATION_MS,
+            ),
           )
           : 0,
       chainDepth: this.chainDepth,
-      topOccupiedRow: this.topOccupiedRow(visualNow),
+      topOccupiedRow: this.topOccupiedRow(boardVisualNow),
       levelLightBlends: this.levelLights.map((_, index) => (
         this.levelLightBlendAt(index, visualNow)
       )),
@@ -1377,6 +1470,7 @@ export class CrackAttackEngine {
       nextAwakeningMs: nextAwakeningAt === null ? null : Math.max(0, nextAwakeningAt - visualNow),
       pausedElapsedMs: this.status === "paused" ? Math.max(0, now - this.pausedAt) : 0,
       visualNow,
+      boardVisualNow,
     };
   }
 
@@ -1853,7 +1947,10 @@ export class CrackAttackEngine {
             kind: "garbage",
             groupId,
             flavor: "normal",
-            texture: cell.texture,
+            // GarbageFlavorImage belongs to the original shattered resident.
+            // Its association is released when that shell disappears; a row
+            // that reforms as new garbage must not retain or monopolize it.
+            texture: null,
             state: "awakening",
             awakenRevealAt: revealAt,
             awakenReleaseAt: releaseAt,
@@ -2728,7 +2825,7 @@ export class CrackAttackEngine {
   ): number {
     const continuing = this.isVerticalFallMotion(cell, x, logicalFromY, now);
     const fromY = continuing
-      ? this.motionYAt(cell, logicalFromY, now)
+      ? this.motionYAt(cell, logicalFromY, now, false)
       : logicalFromY;
     const delay = continuing || noHang ? 0 : FALL_HANG_MS;
     const duration = Math.max(
@@ -2744,44 +2841,96 @@ export class CrackAttackEngine {
     x: number,
     y: number,
     now: number,
-  ): boolean {
+  ): cell is BlockCell {
     return cell?.kind === "block"
       && this.isVerticalFallMotion(cell, x, y, now);
   }
 
-  private motionYAt(cell: Cell, targetY: number, now: number): number {
+  private isOpenFallReservation(
+    cell: Cell | null,
+    x: number,
+    y: number,
+    now: number,
+  ): boolean {
+    if (!this.isFallReservation(cell, x, y, now)) return false;
+    return this.motionGridY(cell, x, y, now, false) > y;
+  }
+
+  private motionYAt(
+    cell: Cell,
+    targetY: number,
+    now: number,
+    includeCurrentStep = true,
+  ): number {
     if (
       cell.animationStarted === undefined
       || cell.animationDuration === undefined
       || now >= cell.animationStarted + cell.animationDuration
     ) return targetY;
-    const delay = cell.animationDelay ?? 0;
-    const travelDuration = Math.max(1, cell.animationDuration - delay);
-    const raw = Math.max(
-      0,
-      Math.min(
-        1,
-        (now - cell.animationStarted - delay) / travelDuration,
-      ),
-    );
+    const raw = fallMotionProgress(
+      cell,
+      cell.animationFromX ?? 0,
+      targetY,
+      now,
+      includeCurrentStep,
+    ) ?? 0;
     const fromY = cell.animationFromY ?? targetY;
     return fromY + (targetY - fromY) * raw;
   }
 
-  private motionGridY(cell: Cell, x: number, targetY: number, now: number): number {
+  private motionGridY(
+    cell: Cell,
+    x: number,
+    targetY: number,
+    now: number,
+    includeCurrentStep = true,
+  ): number {
     if (!this.isVerticalFallMotion(cell, x, targetY, now)) return targetY;
 
     const started = cell.animationStarted ?? now;
     const delay = cell.animationDelay ?? 0;
     const fromY = cell.animationFromY ?? targetY;
-    if (now < started + delay) return Math.max(targetY, Math.ceil(fromY));
+    if (
+      now < started + delay
+      || (!includeCurrentStep && now <= started + delay)
+    ) return Math.max(targetY, Math.ceil(fromY));
 
     // Block::timeStep and Garbage::timeStep move the resident into the next
     // grid row on the tick that ends the hang, before drawing the first third
-    // of that row. Browser interpolation deliberately remains smooth and is
-    // one visual increment behind that discrete grid coordinate, hence the
-    // ceil-minus-one conversion at every row boundary.
-    return Math.max(targetY, Math.ceil(this.motionYAt(cell, targetY, now)) - 1);
+    // of that row. fallMotionProgress includes that first current-tick step,
+    // so flooring the visible position recovers the resident's exact row.
+    return Math.max(
+      targetY,
+      Math.floor(
+        this.motionYAt(cell, targetY, now, includeCurrentStep)
+          + Number.EPSILON * 16,
+      ),
+    );
+  }
+
+  private fallingResidentAtGridRow(
+    x: number,
+    gridY: number,
+    now: number,
+    hangingOnly: boolean,
+  ): boolean {
+    if (gridY < 0 || gridY >= this.board.length) return false;
+    for (let targetY = 0; targetY < this.board.length; targetY += 1) {
+      const cell = this.board[targetY][x];
+      if (!this.isVerticalFallMotion(cell, x, targetY, now)) continue;
+      if (hangingOnly) {
+        const started = cell.animationStarted ?? now;
+        const delay = cell.animationDelay ?? 0;
+        if (delay <= 0 || now > started + delay) continue;
+      }
+      if (this.motionGridY(cell, x, targetY, now, false) === gridY) return true;
+    }
+    return false;
+  }
+
+  private emptySwapTargetAllowed(x: number, y: number, now: number): boolean {
+    return !this.fallingResidentAtGridRow(x, y - 1, now, false)
+      && !this.fallingResidentAtGridRow(x, y + 1, now, true);
   }
 
   private openFallReservation(x: number, y: number, now: number): boolean {
@@ -2796,7 +2945,10 @@ export class CrackAttackEngine {
       stack.push({
         y: cursorY,
         cell,
-        visualY: this.motionYAt(cell, cursorY, now),
+        // Swapper runs before residents advance for this tick. Retarget from
+        // the pre-step position; the new motion's current-tick lead then keeps
+        // the rendered position continuous.
+        visualY: this.motionYAt(cell, cursorY, now, false),
       });
       cursorY += 1;
     }
@@ -2902,8 +3054,18 @@ export class CrackAttackEngine {
     if (this.scoreBacklog <= 0) return;
 
     this.scoreBacklog -= 1;
+    this.previousDisplayScore = this.displayScore;
     this.displayScore += 1;
     this.scoreFadeTicks = Math.max(1, 12 - 2 * this.scoreBacklog);
+    this.scoreFadeInitialTicks = this.scoreFadeTicks;
+  }
+
+  private scoreFadeTicksAt(now: number): number {
+    if (this.status !== "gameover") return this.scoreFadeTicks;
+    const metaTicks = Math.floor(
+      Math.max(0, now - this.gameOverAt) / SIMULATION_STEP_MS,
+    );
+    return Math.max(0, this.scoreFadeTicks - metaTicks);
   }
 
   private moveCursorTo(x: number, y: number, now: number): void {
@@ -2992,8 +3154,8 @@ export class CrackAttackEngine {
     return Math.max(-1, this.dangerFlashAlarm - elapsedTicks);
   }
 
-  private syncLevelLights(now: number): void {
-    const topRow = this.topOccupiedRow(now);
+  private syncLevelLights(now: number, boardNow = now): void {
+    const topRow = this.topOccupiedRow(boardNow);
     for (let level = 0; level < VISIBLE_ROWS; level += 1) {
       const light = this.levelLights[level];
       const target = topRow >= level ? 1 : 0;
@@ -3052,6 +3214,7 @@ export class CrackAttackEngine {
     }
     while (!locationAvailable()) gridY += 1;
 
+    const playOffsetRows = this.rise + this.impactSpringY / WORLD_UNITS_PER_ROW;
     this.rewardSigns.push({
       id: this.nextEffectId++,
       kind,
@@ -3063,7 +3226,7 @@ export class CrackAttackEngine {
       // The desktop offsets signs half a cell left and half a cell above the
       // selected grid point, with a +/-0.1-cell random spread (6.2 px here).
       x: gridX - 0.5,
-      y: gridY - 0.5 + this.rise,
+      y: gridY - 0.5 + playOffsetRows,
       jitterX: (this.random() - 0.5) * 12.4,
       jitterY: (this.random() - 0.5) * 12.4,
       startedAt: now,
@@ -3078,6 +3241,7 @@ export class CrackAttackEngine {
     count: number,
     now: number,
   ): void {
+    const playOffsetRows = this.rise + this.impactSpringY / WORLD_UNITS_PER_ROW;
     for (let index = 0; index < count && this.deathSparks.length < 400; index += 1) {
       const speed = 0.01 + (this.random() + this.random()) * 0.0325;
       const angle = Math.PI / 4 + this.random() * Math.PI / 2;
@@ -3100,7 +3264,7 @@ export class CrackAttackEngine {
         id: this.nextEffectId++,
         flavor,
         x: x + 0.5,
-        y: y + 0.5 + this.rise,
+        y: y + 0.5 + playOffsetRows,
         velocityX: Math.cos(angle) * speed,
         velocityY: Math.sin(angle) * speed,
         rotation,
@@ -3120,8 +3284,9 @@ export class CrackAttackEngine {
     sibling: number,
   ): void {
     const definition = rewardMoteDefinition(kind, level);
+    const playOffsetRows = this.rise + this.impactSpringY / WORLD_UNITS_PER_ROW;
     const sourceX = anchor.x + Math.floor(this.random() * 20) / 20;
-    const sourceY = anchor.y + this.rise + Math.floor(this.random() * 20) / 20;
+    const sourceY = anchor.y + playOffsetRows + Math.floor(this.random() * 20) / 20;
     const speed = (0.18 + this.random() * 0.04) * definition.inverseMass / 2;
     const rotation = Math.floor(this.random() * 360) * Math.PI / 180;
     let angularVelocity = (2 + this.random() * 2)
@@ -3164,11 +3329,10 @@ export class CrackAttackEngine {
     this.gameOverAt = now;
     this.raiseHeld = false;
     this.raiseToRowBoundary = false;
-    // Score::gameFinish consumes the earned total. Flush any remaining visual
-    // backlog so the result screen and persisted record always use that total.
-    this.displayScore = this.score;
+    // Score::gameFinish records only points that have rolled into Score::score.
+    // Pending backlog is deliberately not awarded when play ends.
+    this.score = this.displayScore;
     this.scoreBacklog = 0;
-    this.scoreFadeTicks = 0;
     this.queuedCursorMove = null;
     this.queuedCursorSwap = false;
     this.events.push({ type: "gameover" });
