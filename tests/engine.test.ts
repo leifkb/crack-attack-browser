@@ -21,6 +21,7 @@ import {
   LEVEL_LIGHT_FADE_MS,
   LEVEL_LIGHT_IMPACT_FLASH_MS,
   LOSE_BAR_FADE_TICKS,
+  REWARD_MOTE_CAPACITY,
   REWARD_MOTE_HOLD_MS,
   REWARD_MOTE_LIGHT_PALETTE,
   REWARD_MOTE_SIBLING_DELAY_MS,
@@ -123,7 +124,7 @@ interface EngineHarness {
     now: number,
     patterns?: MatchPattern[],
   ): void;
-  resolveMatches(now: number, sharedSwapCause?: boolean): void;
+  resolveMatches(now: number, swapCauseCellIds?: ReadonlySet<number>): void;
   finishClear(now: number): void;
   random(): number;
   generateCreepRow(): Array<Cell | null>;
@@ -269,6 +270,56 @@ test("simultaneous unrelated landing matches remain separate causes", () => {
     [3, 3],
   );
   assert.equal(snapshot.rewardSigns.length, 0);
+});
+
+test("a background swap groups only lines touched by its two blocks", () => {
+  const engine = new CrackAttackEngine({ seed: 0x616161 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  for (let y = 0; y < 3; y += 1) {
+    board[y][0] = block(200 + y, y === 1 ? 1 : 0);
+    board[y][1] = block(210 + y, y === 1 ? 0 : 1);
+  }
+  [3, 4, 0].forEach((flavor, index) => {
+    board[0][index + 3] = block(220 + index, flavor as BlockFlavor);
+  });
+  for (let x = 3; x < 6; x += 1) {
+    const landing = block(230 + x, 2);
+    landing.animationFromY = 2;
+    landing.animationStarted = 1000;
+    landing.animationDuration = SWAP_DURATION_MS;
+    board[1][x] = landing;
+    board[3][x] = block(240 + x, 4);
+  }
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.lastUpdate = 1000;
+  internals.startClear(
+    [{ x: 3, y: 3 }, { x: 4, y: 3 }, { x: 5, y: 3 }],
+    false,
+    1000,
+  );
+  engine.drainEvents();
+
+  engine.setCursor(0, 1, 1000);
+  assert.equal(engine.swap(1000), true);
+  engine.update(1000 + SWAP_DURATION_MS);
+
+  const snapshot = engine.getSnapshot(1000 + SWAP_DURATION_MS);
+  assert.equal(snapshot.score, baseScoreFor(3) + baseScoreFor(6) + baseScoreFor(3));
+  assert.deepEqual(
+    engine.drainEvents()
+      .filter((event) => event.type === "clear")
+      .map((event) => event.magnitude)
+      .sort((left, right) => left - right),
+    [3, 6],
+  );
+  assert.deepEqual(
+    snapshot.rewardSigns.map(({ kind, value }) => ({ kind, value })),
+    [{ kind: "magnitude", value: 6 }],
+    "the unrelated same-tick triple does not inflate the swap magnitude",
+  );
 });
 
 test("independent falling lines each advance the active combo and its score", () => {
@@ -813,6 +864,30 @@ test("restart input cannot erase the final score during the Game Over lockout", 
   assert.equal(snapshot.score, 0);
 });
 
+test("a restart clears transient effects instead of retaining their manager state", () => {
+  const engine = new CrackAttackEngine({ seed: 0x68696a });
+  const internals = harness(engine);
+  const gameOverAt = 3000;
+  internals.status = "gameover";
+  internals.gameOverAt = gameOverAt;
+  internals.createRewardSign("magnitude", 4, { x: 2, y: 2 }, 2000);
+  internals.createRewardMote("magnitude", { x: 2, y: 2 }, 0, 2000, 0);
+  internals.createBlockDeathSparks(2, 2, 0, 1, 2000);
+  internals.deathSparks[0].until = 20_000;
+
+  const restartedAt = gameOverAt + GAME_OVER_RESTART_DELAY_MS;
+  let snapshot = engine.getSnapshot(restartedAt);
+  assert.equal(snapshot.rewardSigns.length, 1);
+  assert.equal(snapshot.rewardMotes.length, 1);
+  assert.equal(snapshot.deathSparks.length, 1);
+
+  assert.equal(engine.start(restartedAt, 0x6b6c6d), true);
+  snapshot = engine.getSnapshot(restartedAt);
+  assert.equal(snapshot.rewardSigns.length, 0);
+  assert.equal(snapshot.rewardMotes.length, 0);
+  assert.equal(snapshot.deathSparks.length, 0);
+});
+
 test("the first run can be reseeded just like later runs", () => {
   const engine = new CrackAttackEngine({ seed: 0x11111111 });
   const expected = new CrackAttackEngine({ seed: 0x22222222 });
@@ -924,6 +999,17 @@ test("the opening uses three one-second counts followed by Fight during play", (
   snapshot = engine.getSnapshot(3100 + COUNTDOWN_SEGMENT_MS - 1);
   assert.equal(snapshot.countdown, "GO!");
   assert.equal(engine.getSnapshot(3100 + COUNTDOWN_SEGMENT_MS).countdown, null);
+});
+
+test("the playfield headlight brightens with the original square-root opening fade", () => {
+  const engine = new CrackAttackEngine({ seed: 0x323334 });
+  engine.start(100);
+
+  assert.equal(engine.getSnapshot(100).headlightLevel, 0);
+  assert.equal(engine.getSnapshot(850).headlightLevel, 0.5);
+  assert.ok(Math.abs(engine.getSnapshot(1600).headlightLevel - Math.sqrt(0.5)) < 1e-12);
+  engine.update(100 + COUNTDOWN_START_DELAY_MS);
+  assert.equal(engine.getSnapshot(100 + COUNTDOWN_START_DELAY_MS).headlightLevel, 1);
 });
 
 test("pausing the opening preserves the remaining countdown", () => {
@@ -2393,6 +2479,15 @@ test("transient effects capture both creep and impact-spring offsets", () => {
   assert.equal(internals.rewardSigns[0].y, 1.25);
   assert.equal(internals.rewardMotes[0].y, 4.25);
   assert.equal(internals.deathSparks[0].y, 4.25);
+});
+
+test("reward motes retain the desktop manager's forty-slot capacity", () => {
+  const engine = new CrackAttackEngine({ seed: 0x929394 });
+  const internals = harness(engine);
+  for (let index = 0; index < REWARD_MOTE_CAPACITY + 5; index += 1) {
+    internals.createRewardMote("magnitude", { x: 2, y: 3 }, 0, 1000, index);
+  }
+  assert.equal(internals.rewardMotes.length, REWARD_MOTE_CAPACITY);
 });
 
 test("death sparks use desktop drag, gravity, lifetimes, pulse, and uncapped clear counts", () => {

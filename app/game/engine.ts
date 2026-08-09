@@ -42,6 +42,7 @@ export const DANGER_HIGH_ALERT_MS =
 export const REWARD_SIGN_HOLD_MS = 100 * 20;
 export const REWARD_SIGN_FADE_MS = 200 * 20;
 export const REWARD_SIGN_LIFETIME_MS = REWARD_SIGN_HOLD_MS + REWARD_SIGN_FADE_MS;
+export const REWARD_MOTE_CAPACITY = 40;
 // SparkleManager stores velocity in grid-world units per simulation tick.
 // Browser particles use rows, and one row is two original world units.
 export const DEATH_SPARK_GRAVITY = 0.001 / 2;
@@ -587,6 +588,7 @@ export interface GameSnapshot {
   pausedElapsedMs: number;
   visualNow: number;
   boardVisualNow: number;
+  headlightLevel: number;
 }
 
 type Phase = "idle" | "swapping" | "clearing" | "falling" | "garbage";
@@ -837,6 +839,7 @@ export class CrackAttackEngine {
   private backgroundSwapStarted = 0;
   private backgroundSwapUntil = 0;
   private backgroundSwapCellIds = new Set<number>();
+  private foregroundSwapCellIds = new Set<number>();
   private backgroundFallUntil = 0;
   private lastUpdate: number | null = null;
   private simulationRemainderMs = 0;
@@ -939,6 +942,7 @@ export class CrackAttackEngine {
     this.backgroundSwapStarted = 0;
     this.backgroundSwapUntil = 0;
     this.backgroundSwapCellIds = new Set<number>();
+    this.foregroundSwapCellIds = new Set<number>();
     this.backgroundFallUntil = 0;
     this.lastUpdate = null;
     this.simulationRemainderMs = 0;
@@ -1302,16 +1306,18 @@ export class CrackAttackEngine {
     this.board[y][x + 1] = left;
     if (right) this.setMotion(right, x + 1, y, now, SWAP_DURATION_MS);
     if (left) this.setMotion(left, x, y, now, SWAP_DURATION_MS);
+    const swappedBlockIds = new Set(
+      [left, right]
+        .flatMap((cell) => cell?.kind === "block" ? [cell.id] : []),
+    );
     if (duringBackgroundAnimation) {
       this.backgroundSwapStarted = now;
       this.backgroundSwapUntil = now + SWAP_DURATION_MS;
-      this.backgroundSwapCellIds = new Set(
-        [left, right]
-          .flatMap((cell) => cell?.kind === "block" ? [cell.id] : []),
-      );
+      this.backgroundSwapCellIds = swappedBlockIds;
     } else {
       this.phase = "swapping";
       this.phaseUntil = now + SWAP_DURATION_MS;
+      this.foregroundSwapCellIds = swappedBlockIds;
     }
     this.events.push({ type: "swap" });
     return true;
@@ -1370,6 +1376,7 @@ export class CrackAttackEngine {
     // drawing the board. Candy, score fades, level lights, and the loss message
     // keep advancing on the meta clock, but blocks and the swapper stay frozen.
     const boardVisualNow = this.status === "gameover" ? this.gameOverAt : visualNow;
+    let headlightLevel = 1;
     let countdown: GameSnapshot["countdown"] = null;
     let countdownProgress = 0;
     if (this.status === "countdown") {
@@ -1377,6 +1384,10 @@ export class CrackAttackEngine {
         0,
         visualNow - (this.countdownUntil - COUNTDOWN_START_DELAY_MS),
       );
+      // LightManager scales both the playfield headlight's diffuse and
+      // specular colors by sqrt(elapsed / opening-delay). Reward-mote lights
+      // remain independent and are added by the renderer after this level.
+      headlightLevel = Math.sqrt(Math.min(1, elapsed / COUNTDOWN_START_DELAY_MS));
       if (elapsed < COUNTDOWN_SEGMENT_MS) {
         countdown = "3";
         countdownProgress = elapsed / COUNTDOWN_SEGMENT_MS;
@@ -1471,6 +1482,7 @@ export class CrackAttackEngine {
       pausedElapsedMs: this.status === "paused" ? Math.max(0, now - this.pausedAt) : 0,
       visualNow,
       boardVisualNow,
+      headlightLevel,
     };
   }
 
@@ -1497,13 +1509,14 @@ export class CrackAttackEngine {
   private finishBackgroundSwap(now: number): void {
     if (this.backgroundSwapUntil <= 0 || now < this.backgroundSwapUntil) return;
 
+    const swapCauseCellIds = this.backgroundSwapCellIds;
     this.backgroundSwapStarted = 0;
     this.backgroundSwapUntil = 0;
-    this.backgroundSwapCellIds.clear();
+    this.backgroundSwapCellIds = new Set<number>();
 
     const fallDuration = this.applyGravity(now);
     if (fallDuration > 0) this.scheduleFall(now, fallDuration);
-    else this.resolveMatches(now, true);
+    else this.resolveMatches(now, swapCauseCellIds);
     this.refreshPhase(now);
   }
 
@@ -1654,11 +1667,13 @@ export class CrackAttackEngine {
   }
 
   private afterSwap(now: number): void {
+    const swapCauseCellIds = this.foregroundSwapCellIds;
+    this.foregroundSwapCellIds = new Set<number>();
     const fallDuration = this.applyGravity(now);
     if (fallDuration > 0) {
       this.scheduleFall(now, fallDuration);
     } else {
-      this.resolveMatches(now, true);
+      this.resolveMatches(now, swapCauseCellIds);
       this.refreshPhase(now);
     }
   }
@@ -2183,7 +2198,7 @@ export class CrackAttackEngine {
   private startDetectedMatches(
     result: MatchResult,
     now: number,
-    sharedSwapCause = false,
+    swapCauseCellIds?: ReadonlySet<number>,
   ): void {
     if (result.patterns.length === 0) return;
     const grouped = new Map<string, {
@@ -2200,6 +2215,11 @@ export class CrackAttackEngine {
         })
         .find((id): id is number => id !== undefined && this.combos.has(id));
       const combo = comboId === undefined ? null : this.combos.get(comboId) ?? null;
+      const causedBySwap = swapCauseCellIds !== undefined
+        && pattern.coordinates.some(({ x, y }) => {
+          const cell = this.board[y]?.[x] ?? null;
+          return cell?.kind === "block" && swapCauseCellIds.has(cell.id);
+        });
       // Both blocks in one completed swap share a magnitude tally in the
       // original game. Keep fresh patterns from that swap together, so (for
       // example) two separate triples score and attack as one six-block
@@ -2208,7 +2228,7 @@ export class CrackAttackEngine {
       // but neither becomes a magnitude-six clear.
       const key = combo
         ? `combo:${combo.id}:pattern:${index}`
-        : sharedSwapCause
+        : causedBySwap
           ? "swap"
           : `new:${index}`;
       const entry = grouped.get(key) ?? {
@@ -2234,7 +2254,7 @@ export class CrackAttackEngine {
     }
   }
 
-  private resolveMatches(now: number, sharedSwapCause = false): void {
+  private resolveMatches(now: number, swapCauseCellIds?: ReadonlySet<number>): void {
     // A falling block is drawn over its destination but has not joined the
     // grid there yet. Hide moving cells from detection so a settled line can
     // clear beside one without accidentally including—or waiting for—it.
@@ -2248,7 +2268,7 @@ export class CrackAttackEngine {
     const motionPending = now < this.backgroundSwapUntil
       || now < this.backgroundFallUntil;
     if (matches.coordinates.length > 0) {
-      this.startDetectedMatches(matches, now, sharedSwapCause);
+      this.startDetectedMatches(matches, now, swapCauseCellIds);
     }
 
     for (let y = 0; y < this.board.length; y += 1) {
@@ -3283,6 +3303,7 @@ export class CrackAttackEngine {
     now: number,
     sibling: number,
   ): void {
+    if (this.rewardMotes.length >= REWARD_MOTE_CAPACITY) return;
     const definition = rewardMoteDefinition(kind, level);
     const playOffsetRows = this.rise + this.impactSpringY / WORLD_UNITS_PER_ROW;
     const sourceX = anchor.x + Math.floor(this.random() * 20) / 20;

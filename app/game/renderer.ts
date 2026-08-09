@@ -255,10 +255,19 @@ function fixedFunctionVertexTone(
   moteLights: WebGLPointLight[] = [],
   lightBounds: WebGLLightBounds = [point[0], point[1], point[0], point[1]],
   quadraticAttenuation = 0,
+  headlightLevel = 1,
 ): FixedFunctionTone {
   const headlight = pointLightTone(normal, point, ORIGINAL_LIGHT_POSITION);
-  const diffuse: Color3 = [headlight.diffuse, headlight.diffuse, headlight.diffuse];
-  const specular: Color3 = [headlight.specular, headlight.specular, headlight.specular];
+  const diffuse: Color3 = [
+    headlight.diffuse * headlightLevel,
+    headlight.diffuse * headlightLevel,
+    headlight.diffuse * headlightLevel,
+  ];
+  const specular: Color3 = [
+    headlight.specular * headlightLevel,
+    headlight.specular * headlightLevel,
+    headlight.specular * headlightLevel,
+  ];
   const activeLights = moteLights
     .filter((light) => moteLightCenterFade(light.position, lightBounds) > 0)
     .slice(0, 7);
@@ -932,6 +941,7 @@ interface MeshRenderOptions {
   scale?: number;
   centerZ?: number;
   moteLights?: WebGLPointLight[];
+  headlightLevel?: number;
 }
 
 function drawWorldMeshCube(
@@ -1018,6 +1028,8 @@ function drawWorldMeshCube(
         face.points[index] ?? face.points[0],
         options.moteLights,
         lightBounds,
+        0,
+        options.headlightLevel,
       ));
     context.beginPath();
     projected.forEach(([x, y], index) => {
@@ -1049,7 +1061,7 @@ function drawWorldMeshCube(
       context.fillStyle = fixedFunctionColor(color, tones[0]);
     }
     context.fill();
-    context.strokeStyle = "rgba(0, 0, 0, .3)";
+    context.strokeStyle = `rgba(0, 0, 0, ${0.3 * (options.headlightLevel ?? 1)})`;
     context.lineWidth = 0.55;
     context.stroke();
   }
@@ -1059,6 +1071,7 @@ function drawFallbackCube(
   context: CanvasRenderingContext2D,
   color: Color3,
   size: number,
+  headlightLevel = 1,
 ): void {
   const half = size / 2;
   const center: [number, number] = [0, 0];
@@ -1072,10 +1085,10 @@ function drawFallbackCube(
     context.beginPath();
     facet.points.forEach(([x, y], index) => index === 0 ? context.moveTo(x, y) : context.lineTo(x, y));
     context.closePath();
-    context.fillStyle = colorToCss(color, facet.light);
+    context.fillStyle = colorToCss(color, facet.light * headlightLevel);
     context.fill();
   }
-  context.strokeStyle = "rgba(0, 0, 0, .72)";
+  context.strokeStyle = `rgba(0, 0, 0, ${0.72 * headlightLevel})`;
   context.lineWidth = 1.4;
   context.strokeRect(-half, -half, size, size);
 }
@@ -1194,6 +1207,7 @@ function drawBlockVisual(
   screenY: number,
   shadowBlur: number,
   moteLights: WebGLPointLight[] = [],
+  headlightLevel = 1,
 ): void {
   const {
     scale,
@@ -1209,7 +1223,7 @@ function drawBlockVisual(
 
   context.save();
   context.globalAlpha = alpha;
-  context.shadowColor = colorToCss(color, 1.05);
+  context.shadowColor = colorToCss(color, 1.05 * headlightLevel);
   context.shadowBlur = shadowBlur;
   if (assets.blockMesh) {
     drawWorldMeshCube(
@@ -1227,13 +1241,14 @@ function drawBlockVisual(
         scale,
         centerZ,
         moteLights,
+        headlightLevel,
       },
     );
   } else {
     context.translate(screenX + CELL_SIZE / 2, screenY + CELL_SIZE / 2);
     context.scale(scale, scale);
     context.rotate(rotateZ);
-    drawFallbackCube(context, color, BLOCK_MESH_SIZE);
+    drawFallbackCube(context, color, BLOCK_MESH_SIZE, headlightLevel);
   }
   context.restore();
 }
@@ -1248,6 +1263,7 @@ function drawBlock(
   dimmed = false,
   moteLights: WebGLPointLight[] = [],
   motion?: MotionPosition,
+  headlightLevel = 1,
 ): void {
   drawBlockVisual(
     context,
@@ -1257,6 +1273,7 @@ function drawBlock(
     screenY,
     cell.state === "clearing" ? 9 : 4,
     moteLights,
+    headlightLevel,
   );
 }
 
@@ -1423,7 +1440,11 @@ function renderWebGLBlocks(
   moteLights: WebGLPointLight[],
   layer: BlockWebGLLayer,
 ): boolean {
-  if (!assets.blockMesh || !layer.begin(assets.blockMesh, moteLights)) return false;
+  if (!assets.blockMesh || !layer.begin(
+    assets.blockMesh,
+    moteLights,
+    snapshot.headlightLevel,
+  )) return false;
 
   snapshot.nextRow.forEach((cell, x) => {
     if (!cell || cell.kind !== "block") return;
@@ -1783,7 +1804,7 @@ function drawGarbage(
 
   context.save();
   context.globalAlpha = alpha;
-  context.shadowColor = colorToCss(color, 0.72);
+  context.shadowColor = colorToCss(color, 0.72 * snapshot.headlightLevel);
   context.shadowBlur = 0;
   for (const face of renderedFaces) {
     const projected = face.points.map((point) => projectWorldPoint(
@@ -1798,6 +1819,7 @@ function drawGarbage(
       moteLights,
       lightBounds,
       0.1,
+      snapshot.headlightLevel,
     ));
     context.beginPath();
     projected.forEach(([x, y], index) => {
@@ -1821,18 +1843,23 @@ function drawGarbage(
         projected[brightest][1],
       );
       const average = averageFixedFunctionTone(tones);
-      gradient.addColorStop(0, fixedFunctionColor(color, tones[darkest], 0.025));
-      gradient.addColorStop(0.5, fixedFunctionColor(color, average, 0.025));
-      gradient.addColorStop(1, fixedFunctionColor(color, tones[brightest], 0.025));
+      const diffuseFloor = 0.025 * snapshot.headlightLevel;
+      gradient.addColorStop(0, fixedFunctionColor(color, tones[darkest], diffuseFloor));
+      gradient.addColorStop(0.5, fixedFunctionColor(color, average, diffuseFloor));
+      gradient.addColorStop(1, fixedFunctionColor(color, tones[brightest], diffuseFloor));
       context.fillStyle = gradient;
     } else {
-      context.fillStyle = fixedFunctionColor(color, tones[0], 0.025);
+      context.fillStyle = fixedFunctionColor(
+        color,
+        tones[0],
+        0.025 * snapshot.headlightLevel,
+      );
     }
     context.fill();
     context.shadowBlur = 0;
     context.strokeStyle = group.flavor === "gray"
-      ? "rgba(0, 0, 0, .5)"
-      : "rgba(44, 0, 5, .62)";
+      ? `rgba(0, 0, 0, ${0.5 * snapshot.headlightLevel})`
+      : `rgba(44, 0, 5, ${0.62 * snapshot.headlightLevel})`;
     context.lineWidth = 0.65;
     context.stroke();
   }
@@ -1870,6 +1897,7 @@ function drawGarbage(
     });
     context.closePath();
     context.clip();
+    context.filter = `brightness(${snapshot.headlightLevel})`;
     const imageWorldSize = 4;
     const imageCenterX = worldCenter[0] + 2 * group.decalX + 2 - widthCells;
     const imageCenterY = worldCenter[1] + 2 * group.decalY + 2 - heightCells;
@@ -2023,6 +2051,7 @@ function drawSwapperMesh(
   doubleSided: boolean,
   centerX: number,
   centerY: number,
+  headlightLevel = 1,
 ): void {
   const faces: RenderedFace[] = [];
   const mirrors: Array<[number, number]> = [[1, 1], [-1, -1], [1, -1], [-1, 1]];
@@ -2062,7 +2091,7 @@ function drawSwapperMesh(
   }
   faces.sort((left, right) => left.depth - right.depth);
 
-  context.shadowColor = "rgba(255, 255, 255, .9)";
+  context.shadowColor = `rgba(255, 255, 255, ${0.9 * headlightLevel})`;
   context.shadowBlur = 2.5;
   for (const face of faces) {
     const center: Vector3 = [
@@ -2089,8 +2118,8 @@ function drawSwapperMesh(
     const halfLight = Math.max(0, normal[0] * halfDirection[0]
       + normal[1] * halfDirection[1]
       + normal[2] * halfDirection[2]);
-    const light = 0.035 + diffuse;
-    const specular = 0.5 * Math.pow(halfLight, 10);
+    const light = (0.035 + diffuse) * headlightLevel;
+    const specular = 0.5 * Math.pow(halfLight, 10) * headlightLevel;
     context.beginPath();
     face.points.forEach((point, index) => {
       const [x, y] = projectWorldPoint(
@@ -2106,7 +2135,7 @@ function drawSwapperMesh(
     context.fillStyle = colorToCss([0.88, 0.89, 0.96], light, specular);
     context.fill();
     context.shadowBlur = 0;
-    context.strokeStyle = "rgba(8, 8, 20, .45)";
+    context.strokeStyle = `rgba(8, 8, 20, ${0.45 * headlightLevel})`;
     context.lineWidth = 0.45;
     context.stroke();
   }
@@ -2127,6 +2156,7 @@ function drawCursor(context: CanvasRenderingContext2D, snapshot: GameSnapshot): 
     snapshot.swapProgress > 0,
     centerX,
     centerY,
+    snapshot.headlightLevel,
   );
 }
 
@@ -2228,8 +2258,12 @@ function drawTransientEffects(
   assets: RenderAssets,
 ): void {
   drawDeathSparks(context, snapshot.deathSparks, snapshot.visualNow);
-  for (const mote of snapshot.rewardMotes) drawRewardMote(context, mote, snapshot.visualNow);
-  for (const sign of snapshot.rewardSigns) drawRewardSign(context, sign, assets, snapshot.visualNow);
+  for (const mote of snapshot.rewardMotes) {
+    drawRewardMote(context, mote, snapshot.visualNow);
+  }
+  for (const sign of snapshot.rewardSigns) {
+    drawRewardSign(context, sign, assets, snapshot.visualNow);
+  }
 }
 
 function drawCenteredAsset(
@@ -2414,6 +2448,8 @@ export function drawGame(
             boardNow,
             true,
             moteLights,
+            undefined,
+            snapshot.headlightLevel,
           );
         });
 
@@ -2435,6 +2471,7 @@ export function drawGame(
                   position.y,
                   4,
                   moteLights,
+                  snapshot.headlightLevel,
                 );
               } else {
                 drawBlock(
@@ -2446,6 +2483,8 @@ export function drawGame(
                   boardNow,
                   false,
                   moteLights,
+                  undefined,
+                  snapshot.headlightLevel,
                 );
               }
             }
@@ -2480,6 +2519,7 @@ export function drawGame(
                 position.y,
                 4,
                 moteLights,
+                snapshot.headlightLevel,
               );
             }
           }
@@ -2505,6 +2545,7 @@ export function drawGame(
               false,
               moteLights,
               motion,
+              snapshot.headlightLevel,
             );
           }
         }
