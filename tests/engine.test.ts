@@ -39,6 +39,8 @@ import {
   rewardMoteDefinition,
   rewardMoteVisualAt,
   rewardSignVisualAt,
+  soloHudStarVisual,
+  sourceSqrtCurve,
   type AttackPayload,
   type Board,
   type BlockCell,
@@ -125,6 +127,7 @@ interface EngineHarness {
     patterns?: MatchPattern[],
   ): void;
   resolveMatches(now: number, swapCauseCellIds?: ReadonlySet<number>): void;
+  insertCreepRow(now: number): void;
   finishClear(now: number): void;
   random(): number;
   generateCreepRow(): Array<Cell | null>;
@@ -322,7 +325,7 @@ test("a background swap groups only lines touched by its two blocks", () => {
   );
 });
 
-test("independent falling lines each advance the active combo and its score", () => {
+test("same-tick falling lines aggregate before the active combo is scored", () => {
   const engine = new CrackAttackEngine({ seed: 0x232323 });
   const internals = harness(engine);
   const initialBoard = createEmptyBoard();
@@ -364,7 +367,11 @@ test("independent falling lines each advance the active combo and its score", ()
   const snapshot = engine.getSnapshot(1000);
   const events = engine.drainEvents();
   assert.equal(snapshot.chainDepth, 3, "two late patterns advance 1x through 2x to 3x");
-  assert.equal(snapshot.score, 18, "each late triple is scored at its own combo depth");
+  assert.equal(
+    snapshot.score,
+    (baseScoreFor(3) + baseScoreFor(6)) * 3,
+    "ComboManager scores the tick's combined magnitude at the final multiplier",
+  );
   assert.deepEqual(
     events
       .filter((event) => event.type === "chain")
@@ -377,22 +384,23 @@ test("independent falling lines each advance the active combo and its score", ()
       .map((sign) => sign.value),
     [2, 3],
   );
-  assert.equal(
-    snapshot.rewardSigns.filter((sign) => sign.kind === "magnitude").length,
-    0,
-    "two causally linked triples do not also announce a magnitude-six clear",
+  assert.deepEqual(
+    snapshot.rewardSigns
+      .filter((sign) => sign.kind === "magnitude")
+      .map((sign) => sign.value),
+    [6],
   );
   assert.equal(
     snapshot.incomingCount,
-    0,
-    "the two triples do not generate magnitude-six garbage",
+    1,
+    "GarbageGenerator receives the combined magnitude-six clear",
   );
   assert.deepEqual(
     events
       .filter((event) => event.type === "clear")
       .map((event) => event.magnitude),
-    [3, 3],
-    "each causal line keeps its own elimination magnitude",
+    [6],
+    "one ComboTabulator reports its one combined same-tick magnitude",
   );
 });
 
@@ -415,12 +423,18 @@ test("two late lines add two levels to an already-running higher combo", () => {
 
   const snapshot = engine.getSnapshot(2000);
   assert.equal(snapshot.chainDepth, 6);
-  assert.equal(snapshot.score, 64);
+  assert.equal(snapshot.score, 76);
   assert.deepEqual(
     snapshot.rewardSigns
       .filter((sign) => sign.kind === "multiplier")
       .map((sign) => sign.value),
     [5, 6],
+  );
+  assert.deepEqual(
+    snapshot.rewardSigns
+      .filter((sign) => sign.kind === "magnitude")
+      .map((sign) => sign.value),
+    [6],
   );
 });
 
@@ -678,6 +692,43 @@ test("the initial stack seeds the desktop creep-generation history", () => {
   );
 });
 
+test("one creep insertion shares its magnitude across every new line", () => {
+  const engine = new CrackAttackEngine({ seed: 0x31415926 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  board[0][0] = block(1000, 0);
+  board[1][0] = block(1001, 0);
+  board[0][3] = block(1002, 1);
+  board[1][3] = block(1003, 1);
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.nextRow = [
+    block(1010, 0),
+    block(1011, 2),
+    block(1012, 3),
+    block(1013, 1),
+    block(1014, 4),
+    block(1015, 2),
+  ];
+
+  internals.insertCreepRow(1000);
+
+  const snapshot = engine.getSnapshot(1000);
+  assert.equal(snapshot.score, baseScoreFor(6));
+  assert.deepEqual(
+    engine.drainEvents()
+      .filter((event) => event.type === "clear")
+      .map((event) => event.magnitude),
+    [6],
+  );
+  assert.deepEqual(
+    snapshot.rewardSigns.map(({ kind, value }) => ({ kind, value })),
+    [{ kind: "magnitude", value: 6 }],
+  );
+  assert.equal(snapshot.incomingCount, 1);
+});
+
 test("creep rows use persistent history instead of the current live stack", () => {
   const engine = new CrackAttackEngine({ seed: 0x87654321 });
   const internals = harness(engine);
@@ -837,6 +888,32 @@ test("falling alone does not pause the game-over clock", () => {
     1020,
     "only dying or awakening pieces freeze Creep::loss_alarm",
   );
+});
+
+test("Escape-style concession is opening-gated and also works from Pause", () => {
+  const playing = new CrackAttackEngine({ seed: 0x657363 });
+  playing.start(100);
+  assert.equal(playing.concede(3099), false);
+  assert.equal(playing.getSnapshot(3099).status, "countdown");
+  playing.update(3100);
+  assert.equal(playing.concede(3100), true);
+  assert.equal(
+    playing.getSnapshot(3100).status,
+    "playing",
+    "the source completes the next normal play tick before ending",
+  );
+  playing.update(3120);
+  assert.equal(playing.getSnapshot(3120).status, "gameover");
+
+  const paused = new CrackAttackEngine({ seed: 0x70617573 });
+  paused.start(100);
+  paused.update(3100);
+  paused.togglePause(3100);
+  assert.equal(paused.getSnapshot(4100).status, "paused");
+  assert.equal(paused.concede(4100), true);
+  const result = paused.getSnapshot(4100);
+  assert.equal(result.status, "gameover");
+  assert.equal(result.boardVisualNow, 4100);
 });
 
 test("restart input cannot erase the final score during the Game Over lockout", () => {
@@ -1001,13 +1078,105 @@ test("the opening uses three one-second counts followed by Fight during play", (
   assert.equal(engine.getSnapshot(3100 + COUNTDOWN_SEGMENT_MS).countdown, null);
 });
 
-test("the playfield headlight brightens with the original square-root opening fade", () => {
+test("held Swap and Raise carry through the opening lock", () => {
+  const swapping = new CrackAttackEngine({ seed: 0x686f6c64 });
+  const swapInternals = harness(swapping);
+  const board = createEmptyBoard();
+  board[3][2] = block(1100, 0);
+  board[3][3] = block(1101, 1);
+  swapInternals.board = board;
+  swapping.start(100);
+  assert.equal(swapping.swap(1000), false, "the held action is queued, not performed early");
+  swapping.update(3100);
+  assert.notEqual(
+    swapping.getSnapshot(3100).phase,
+    "swapping",
+    "Swapper runs before CountDownManager releases the opening lock",
+  );
+  swapping.update(3120);
+  assert.equal(swapping.getSnapshot(3120).phase, "swapping");
+  assert.ok(swapping.drainEvents().some((event) => event.type === "swap"));
+
+  const released = new CrackAttackEngine({ seed: 0x72656c73 });
+  const releasedInternals = harness(released);
+  releasedInternals.board = board.map((row) => row.map((cell) => (
+    cell?.kind === "block" ? block(cell.id + 10, cell.flavor) : null
+  )));
+  released.start(100);
+  assert.equal(released.swap(1000), false);
+  released.releaseCountdownSwap();
+  released.update(3100);
+  assert.notEqual(released.getSnapshot(3100).phase, "swapping");
+  assert.ok(!released.drainEvents().some((event) => event.type === "swap"));
+
+  const normalRaise = new CrackAttackEngine({ seed: 0x72616973 });
+  const heldRaise = new CrackAttackEngine({ seed: 0x72616973 });
+  normalRaise.start(100);
+  heldRaise.start(100);
+  heldRaise.setRaiseHeld(true);
+  normalRaise.update(3100);
+  heldRaise.update(3100);
+  assert.ok(
+    heldRaise.getSnapshot(3100).rise > normalRaise.getSnapshot(3100).rise * 100,
+    "Creep sees the held Advance bit on its first unlocked tick",
+  );
+
+  const tappedRaise = new CrackAttackEngine({ seed: 0x72616973 });
+  tappedRaise.start(100);
+  tappedRaise.setRaiseHeld(true);
+  tappedRaise.setRaiseHeld(false);
+  tappedRaise.update(3100);
+  assert.equal(
+    tappedRaise.getSnapshot(3100).rise,
+    normalRaise.getSnapshot(3100).rise,
+    "a released countdown key does not commit a future row",
+  );
+});
+
+test("source fades retain Crack Attack's polynomial square-root curve", () => {
+  assert.equal(sourceSqrtCurve(0), 0);
+  assert.equal(sourceSqrtCurve(1), 1);
+  assert.ok(Math.abs(sourceSqrtCurve(0.5) - 41 / 56) < 1e-12);
+  assert.ok(
+    sourceSqrtCurve(0.1) < Math.sqrt(0.1),
+    "the opening stays darker than a true square root near zero",
+  );
+});
+
+test("the solo score star accelerates, then slows and fades after loss", () => {
+  const radiansPerDegree = Math.PI / 180;
+  assert.deepEqual(soloHudStarVisual(0), { rotation: 0, alpha: 1 });
+  assert.ok(
+    Math.abs(soloHudStarVisual(1).rotation - (2 / 150) * radiansPerDegree) < 1e-12,
+  );
+  const atFullSpeed = soloHudStarVisual(149);
+  const nextPlayTick = soloHudStarVisual(150);
+  assert.ok(
+    Math.abs(nextPlayTick.rotation - atFullSpeed.rotation - radiansPerDegree) < 1e-12,
+    "normal play advances one degree per 50 Hz tick",
+  );
+
+  const lossStart = soloHudStarVisual(150, 0);
+  const firstLossTick = soloHudStarVisual(150, 1);
+  assert.ok(firstLossTick.rotation > lossStart.rotation);
+  assert.ok(firstLossTick.alpha < lossStart.alpha);
+  assert.ok(Math.abs(soloHudStarVisual(150, 224).alpha - 0.4) < 1e-12);
+  assert.equal(
+    soloHudStarVisual(150, 224).rotation,
+    soloHudStarVisual(150, 500).rotation,
+    "the lost star stops turning after the 225-tick celebration",
+  );
+});
+
+test("the playfield headlight brightens with the original opening fade curve", () => {
   const engine = new CrackAttackEngine({ seed: 0x323334 });
   engine.start(100);
 
   assert.equal(engine.getSnapshot(100).headlightLevel, 0);
-  assert.equal(engine.getSnapshot(850).headlightLevel, 0.5);
-  assert.ok(Math.abs(engine.getSnapshot(1600).headlightLevel - Math.sqrt(0.5)) < 1e-12);
+  assert.equal(engine.getSnapshot(850).headlightLevel, sourceSqrtCurve(0.25));
+  assert.ok(
+    Math.abs(engine.getSnapshot(1600).headlightLevel - sourceSqrtCurve(0.5)) < 1e-12,
+  );
   engine.update(100 + COUNTDOWN_START_DELAY_MS);
   assert.equal(engine.getSnapshot(100 + COUNTDOWN_START_DELAY_MS).headlightLevel, 1);
 });

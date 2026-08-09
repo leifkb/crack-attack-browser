@@ -24,6 +24,7 @@ import {
   playfieldVisible,
   retainedGarbageVisual,
   scoreDigitTransition,
+  sourceSqrtCurve,
   swapMotionTransform,
   swapperVisible,
 } from "../app/game/renderGeometry.ts";
@@ -208,6 +209,12 @@ test("level lights preserve occupancy color through danger and row-impact flashe
   assert.deepEqual(dangerWhite, [1, 1, 1], "the full-board flash reaches white");
   assert.deepEqual(dangerEnd, empty, "the 12-tick flash returns exactly to its base color");
   assert.deepEqual(impactWhite, [1, 1, 1], "an impacted row independently reaches white");
+  assert.ok(
+    Math.abs(halfway[0] - (
+      1.08 * sourceSqrtCurve(0.5)
+    )) < 1e-12,
+    "level-light energy follows Game::sqrt rather than Math.sqrt",
+  );
 });
 
 test("dying blocks use the original pair of triangular flashes", () => {
@@ -238,7 +245,10 @@ test("the countdown recreates the original rush toward the viewer", () => {
   assert.equal(end.alpha, 0);
   assert.equal(goHold.scale, 7);
   assert.equal(goHold.alpha, 1, "Fight holds at full opacity before fading");
-  assert.ok(goFade.alpha > 0 && goFade.alpha < 1);
+  assert.ok(
+    Math.abs(goFade.alpha - sourceSqrtCurve(0.25)) < 1e-12,
+    "Fight fades with the source polynomial",
+  );
 });
 
 test("game over falls from above and settles at the original playfield midpoint", () => {

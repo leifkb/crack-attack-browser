@@ -851,8 +851,8 @@ function drawHud(
     hudCenterX,
     610,
     50,
-    snapshot.visualNow * (Math.PI / 3600),
-    1,
+    snapshot.hudStarRotation,
+    snapshot.hudStarAlpha,
     4,
   );
   const scoreX = hudCenterX - measureSpriteText(score.current, scoreSize) / 2;
@@ -2410,9 +2410,11 @@ export function drawGame(
   drawBackdrop(target);
   drawLevelLights(target, snapshot);
   drawLogo(target, assets);
+  // displayMeta draws the same external candy as live play: the inactive lose
+  // bar, four score digits, and the solo record star remain on the key-wait
+  // screen alongside Score to Beat.
+  drawHud(target, snapshot, assets);
   if (snapshot.status !== "ready") {
-    drawHud(target, snapshot, assets);
-
     // Displayer::displayPlay omits the grid and swapper while paused, but keeps the
     // external candy, transient effects, and pause message visible.
     if (playfieldVisible(snapshot.status)) {
