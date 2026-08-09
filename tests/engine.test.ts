@@ -16,6 +16,7 @@ import {
   DANGER_LOSS_DELAY_MS,
   GAME_OVER_RESTART_DELAY_MS,
   GARBAGE_QUEUE_CAPACITY,
+  GRAY_FLAVOR,
   LEVEL_LIGHT_FADE_MS,
   LEVEL_LIGHT_IMPACT_FLASH_MS,
   LOSE_BAR_FADE_TICKS,
@@ -39,6 +40,7 @@ import {
   type Board,
   type BlockCell,
   type BlockFlavor,
+  type Cell,
   type Coordinate,
   type DeathSpark,
   type GameStatus,
@@ -69,6 +71,7 @@ function garbage(
 
 interface EngineHarness {
   board: Board;
+  nextRow: Array<Cell | null>;
   status: GameStatus;
   phase: "idle" | "swapping" | "clearing" | "falling" | "garbage";
   chainDepth: number;
@@ -89,6 +92,14 @@ interface EngineHarness {
   rewardSigns: RewardSign[];
   deathSparks: DeathSpark[];
   queuedAttacks: Array<AttackPayload & { dropAt: number }>;
+  creepLastFlavor: BlockFlavor;
+  creepSecondLastFlavor: BlockFlavor;
+  creepLastRow: BlockFlavor[];
+  creepSecondLastRow: BlockFlavor[];
+  awakeningLastFlavor: BlockFlavor;
+  awakeningSecondLastFlavor: BlockFlavor;
+  awakeningLastRow: BlockFlavor[];
+  awakeningSecondLastRow: BlockFlavor[];
   loseBarPhase: "inactive" | "low" | "high" | "fade-low" | "fade-high" | "reset-high";
   loseBarProgress: number;
   loseBarFadeTicks: number;
@@ -101,6 +112,10 @@ interface EngineHarness {
   resolveMatches(now: number, sharedSwapCause?: boolean): void;
   finishClear(now: number): void;
   random(): number;
+  generateCreepRow(): Array<Cell | null>;
+  generateAwakeningFlavors(
+    positions: Array<{ x: number; y: number; cell: GarbageCell }>,
+  ): BlockFlavor[];
   createRewardMote(
     kind: "magnitude" | "multiplier",
     anchor: Coordinate,
@@ -458,6 +473,8 @@ test("garbage stars use the original reward-level colors, shapes, sizes, and mas
 test("garbage stars follow the original delayed, downward-first spring zig-zag", () => {
   const engine = new CrackAttackEngine({ seed: 0x51544152 });
   const internals = harness(engine);
+  // Keep this effect test independent of startup board-generation randomness.
+  internals.random = () => 0.1;
   const startedAt = 1000;
   internals.createRewardMote("magnitude", { x: 1, y: 2 }, 0, startedAt, 0);
   internals.createRewardMote("magnitude", { x: 1, y: 2 }, 0, startedAt, 1);
@@ -566,6 +583,122 @@ test("the initial stack never starts with equal orthogonal neighbors", () => {
       }
     }
   }
+});
+
+test("the initial stack seeds the desktop creep-generation history", () => {
+  const engine = new CrackAttackEngine({ seed: 0x12345678 });
+  const internals = harness(engine);
+
+  for (let x = 0; x < BOARD_COLUMNS; x += 1) {
+    assert.equal(
+      internals.creepSecondLastRow[x],
+      (internals.board[0][x] as BlockCell).flavor,
+      `column ${x} remembers the initial bottom block before the hidden row`,
+    );
+    assert.equal(
+      internals.creepLastRow[x],
+      (internals.nextRow[x] as BlockCell).flavor,
+      `column ${x} remembers the generated hidden-row block`,
+    );
+  }
+  assert.equal(
+    internals.creepLastFlavor,
+    (internals.nextRow[0] as BlockCell).flavor,
+    "the global history ends at the left edge of a right-to-left row",
+  );
+  assert.equal(
+    internals.creepSecondLastFlavor,
+    (internals.nextRow[1] as BlockCell).flavor,
+  );
+});
+
+test("creep rows use persistent history instead of the current live stack", () => {
+  const engine = new CrackAttackEngine({ seed: 0x87654321 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  board[0][5] = block(900, 2);
+  board[1][5] = block(901, 2);
+  internals.board = board;
+  internals.creepLastFlavor = 1;
+  internals.creepSecondLastFlavor = 1;
+  internals.creepLastRow = Array.from({ length: BOARD_COLUMNS }, () => 4);
+  internals.creepSecondLastRow = Array.from({ length: BOARD_COLUMNS }, () => 3);
+
+  const randomValues = [0.1, 0.25, 0.45, 0.65, 0.85, 0.05, 0.25, 0.45];
+  internals.random = () => {
+    const value = randomValues.shift();
+    if (value === undefined) throw new Error("creep generator consumed excess randomness");
+    return value;
+  };
+
+  const row = internals.generateCreepRow();
+  assert.deepEqual(
+    row.map((cell) => (cell as BlockCell).flavor),
+    [2, 1, 0, 4, 3, 2],
+    "the low-third no-special roll is followed by a right-to-left color scan",
+  );
+  assert.equal(
+    (row[5] as BlockCell).flavor,
+    2,
+    "live blocks may form an automatic vertical clear after the row rises",
+  );
+  assert.equal(randomValues.length, 0);
+});
+
+test("a gray creep block falls back when persistent history would make three", () => {
+  const engine = new CrackAttackEngine({ seed: 0x19283746 });
+  const internals = harness(engine);
+  internals.creepLastFlavor = 0;
+  internals.creepSecondLastFlavor = 1;
+  internals.creepLastRow = Array.from({ length: BOARD_COLUMNS }, () => 0);
+  internals.creepSecondLastRow = Array.from({ length: BOARD_COLUMNS }, () => 1);
+  internals.creepLastRow[2] = GRAY_FLAVOR;
+  internals.creepSecondLastRow[2] = GRAY_FLAVOR;
+
+  const randomValues = [0.5, 0.4, 0.25, 0.45, 0.65, 0.85, 0.05, 0.25];
+  internals.random = () => {
+    const value = randomValues.shift();
+    if (value === undefined) throw new Error("creep generator consumed excess randomness");
+    return value;
+  };
+
+  const row = internals.generateCreepRow();
+  assert.equal((row[2] as BlockCell).flavor, 4);
+  assert.ok(row.every((cell) => (cell as BlockCell).flavor !== GRAY_FLAVOR));
+  assert.equal(randomValues.length, 0);
+});
+
+test("garbage-awakened color history persists across shatter waves", () => {
+  const engine = new CrackAttackEngine({ seed: 0x10203040 });
+  const internals = harness(engine);
+  internals.awakeningLastFlavor = 0;
+  internals.awakeningSecondLastFlavor = 0;
+  internals.awakeningLastRow = Array.from({ length: BOARD_COLUMNS }, () => 0);
+  internals.awakeningSecondLastRow = Array.from({ length: BOARD_COLUMNS }, () => 0);
+
+  const first = garbage(920, 90);
+  const second = garbage(921, 90);
+  const third = garbage(922, 91);
+  const randomValues = [0.05, 0.25, 0.25, 0.25, 0.45];
+  internals.random = () => {
+    const value = randomValues.shift();
+    if (value === undefined) throw new Error("awakening generator consumed excess randomness");
+    return value;
+  };
+
+  assert.deepEqual(
+    internals.generateAwakeningFlavors([
+      { x: 0, y: 2, cell: first },
+      { x: 0, y: 3, cell: second },
+    ]),
+    [1, 1],
+  );
+  assert.deepEqual(
+    internals.generateAwakeningFlavors([{ x: 0, y: 4, cell: third }]),
+    [2],
+    "the next wave rejects a third generated color in the same column",
+  );
+  assert.equal(randomValues.length, 0);
 });
 
 test("an ordinary swap does not pause the upward creep", () => {
@@ -1549,9 +1682,20 @@ test("garbage reveals bottom-to-top and left-to-right on the original cadence", 
     (board[3][0] as GarbageCell).shatterTargetFlavor,
     (board[3][1] as GarbageCell).shatterTargetFlavor,
   ];
+  const plannedDirections = [
+    (board[2][0] as GarbageCell).shatterPopDirection,
+    (board[2][1] as GarbageCell).shatterPopDirection,
+    (board[3][0] as GarbageCell).shatterPopDirection,
+    (board[3][1] as GarbageCell).shatterPopDirection,
+  ];
   assert.ok(
     plannedFlavors.every((flavor) => flavor !== undefined),
     "the inner cubes know their final colors while the shell unwraps",
+  );
+  assert.deepEqual(
+    plannedDirections,
+    [1, 2, 3, 0],
+    "the first wave advances through desktop directions 2, 3, 4, 1",
   );
   const firstRevealAt = clearStarted + AWAKEN_INITIAL_DELAY_MS;
   engine.update(firstRevealAt);
@@ -1569,6 +1713,11 @@ test("garbage reveals bottom-to-top and left-to-right on the original cadence", 
     "the first revealed colors continue the hidden 3D pop animation",
   );
   assert.deepEqual(
+    awakening.map(({ cell }) => (cell as BlockCell).awakenPopDirection),
+    plannedDirections,
+    "revealed cubes retain the globally assigned twist directions",
+  );
+  assert.deepEqual(
     awakening.map(({ cell }) => (cell as BlockCell).awakenRevealAt),
     [
       clearStarted + AWAKEN_INITIAL_DELAY_MS,
@@ -1583,6 +1732,30 @@ test("garbage reveals bottom-to-top and left-to-right on the original cadence", 
     + AWAKEN_FINAL_DELAY_MS;
   assert.ok(awakening.every(({ cell }) => (cell as BlockCell).awakenReleaseAt === releaseAt));
   assert.equal(findMatchCoordinates(engine.getSnapshot(firstRevealAt).board).length, 0);
+});
+
+test("awakening twist directions continue across separate shatter waves", () => {
+  const engine = new CrackAttackEngine({ seed: 0xa0b0c0 });
+  const internals = harness(engine);
+  let board = createEmptyBoard();
+  for (let x = 0; x < 3; x += 1) board[2][x] = garbage(950 + x, 95);
+  internals.board = board;
+
+  internals.markShatteringGarbage(new Set([95]), 1000, 2300, 1);
+  assert.deepEqual(
+    board[2].slice(0, 3).map((cell) => (cell as GarbageCell).shatterPopDirection),
+    [1, 2, 3],
+  );
+
+  board = createEmptyBoard();
+  for (let x = 0; x < 2; x += 1) board[2][x] = garbage(960 + x, 96);
+  internals.board = board;
+  internals.markShatteringGarbage(new Set([96]), 3000, 4300, 2);
+  assert.deepEqual(
+    board[2].slice(0, 2).map((cell) => (cell as GarbageCell).shatterPopDirection),
+    [0, 1],
+    "the second wave continues at direction one instead of restarting",
+  );
 });
 
 test("alternating full-width garbage rows sometimes reform instead of becoming blocks", () => {
@@ -1602,7 +1775,12 @@ test("alternating full-width garbage rows sometimes reform instead of becoming b
   internals.board = board;
   internals.status = "playing";
   internals.phase = "clearing";
-  internals.random = () => 0.1;
+  const randomValues = [0.1, 0.25, 0.45, 0.65, 0.85, 0.05, 0.25, 0.45];
+  internals.random = () => {
+    const value = randomValues.shift();
+    if (value === undefined) throw new Error("reforming row consumed excess randomness");
+    return value;
+  };
 
   internals.finishClear(1000 + AWAKEN_INITIAL_DELAY_MS);
   const snapshot = engine.getSnapshot(1000 + AWAKEN_INITIAL_DELAY_MS);
