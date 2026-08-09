@@ -125,6 +125,7 @@ test("the WebGL block layer falls back on context loss and rebuilds on restore",
     layer.draw({
       centerX: 526,
       centerY: 534,
+      centerZ: 1,
       color: [1, 0, 0],
       alpha: 1,
       scale: 1,
@@ -144,6 +145,7 @@ test("the WebGL block layer falls back on context loss and rebuilds on restore",
     uploadedColor.forEach((channel) => assert.ok(Math.abs(channel - 0.4) < 1e-6));
     assert.deepEqual(uniforms.get("uLightBounds"), [0, 0, 0, 0]);
     assert.equal(uniforms.get("uMoteLightAttenuation"), 0);
+    assert.equal(uniforms.get("uCenterZ"), 1);
     assert.equal(programCreations, 1);
 
     let prevented = false;

@@ -47,6 +47,7 @@ import {
   messagePulseAlpha,
   playfieldVisible,
   retainedGarbageVisual,
+  swapMotionTransform,
   type Color3,
   type GarbageMesh,
 } from "./renderGeometry";
@@ -406,17 +407,24 @@ export async function loadBlockMesh(source: string): Promise<BlockMesh> {
   return { vertices, normals, faces };
 }
 
+interface MotionPosition {
+  x: number;
+  y: number;
+  rotateY: number;
+  centerZ: number;
+}
+
 function motionPosition(
   cell: Cell,
   x: number,
   y: number,
   now: number,
-): { x: number; y: number } {
+): MotionPosition {
   if (
     cell.animationStarted === undefined
     || cell.animationDuration === undefined
     || now >= cell.animationStarted + cell.animationDuration
-  ) return { x, y };
+  ) return { x, y, rotateY: 0, centerZ: 0 };
 
   const delay = cell.animationDelay ?? 0;
   const travelDuration = Math.max(1, cell.animationDuration - delay);
@@ -425,13 +433,28 @@ function motionPosition(
   );
   const fromX = cell.animationFromX ?? x;
   const fromY = cell.animationFromY ?? y;
+  const horizontalSwap = fromX !== x && fromY === y && cell.state === "idle";
+  if (horizontalSwap) {
+    // DrawBlocks.cxx rotates both residents 180 degrees around their shared
+    // midpoint. The left resident arcs toward the camera while the right one
+    // arcs away, so the swap is an orbit/flip rather than a flat translation.
+    const transform = swapMotionTransform(fromX, x, rawProgress);
+    return {
+      x: transform.x,
+      y,
+      rotateY: transform.rotateY,
+      centerZ: transform.centerZ,
+    };
+  }
   // Original Crack Attack falling advances at a constant per-tick velocity;
-  // retain easing for horizontal swaps and other kinds of motion.
+  // retain easing for any other non-fall motion.
   const verticalFall = fromX === x && fromY > y && cell.state === "idle";
   const progress = verticalFall ? rawProgress : easeOutCubic(rawProgress);
   return {
     x: fromX + (x - fromX) * progress,
     y: fromY + (y - fromY) * progress,
+    rotateY: 0,
+    centerZ: 0,
   };
 }
 
@@ -885,6 +908,7 @@ interface MeshRenderOptions {
   spinAxis?: Vector3;
   spinAngle?: number;
   scale?: number;
+  centerZ?: number;
   moteLights?: WebGLPointLight[];
 }
 
@@ -914,6 +938,7 @@ function drawWorldMeshCube(
     VIEW_CENTER_Y,
     WORLD_UNITS_PER_PIXEL,
   );
+  worldCenter[2] += options.centerZ ?? 0;
   const scale = options.scale ?? 1;
   const lightBounds: WebGLLightBounds = [
     worldCenter[0],
@@ -1042,6 +1067,7 @@ interface BlockVisual {
   spinAxis?: Vector3;
   spinAngle: number;
   color: Color3;
+  centerZ?: number;
 }
 
 function awakeningRotation(sequence: number, remaining: number): {
@@ -1074,7 +1100,12 @@ function awakeningRotation(sequence: number, remaining: number): {
   }
 }
 
-function blockVisual(cell: BlockCell, now: number, dimmed: boolean): BlockVisual {
+function blockVisual(
+  cell: BlockCell,
+  now: number,
+  dimmed: boolean,
+  motion?: MotionPosition,
+): BlockVisual {
   let scale = 1;
   const material = dimmed ? CREEP_ROW_BLOCK_MATERIALS[cell.flavor] : null;
   const alpha = material?.alpha ?? 1;
@@ -1124,11 +1155,12 @@ function blockVisual(cell: BlockCell, now: number, dimmed: boolean): BlockVisual
     scale,
     alpha,
     rotateX,
-    rotateY,
+    rotateY: rotateY + (motion?.rotateY ?? 0),
     rotateZ,
     spinAxis,
     spinAngle,
     color,
+    centerZ: motion?.centerZ ?? 0,
   };
 }
 
@@ -1150,6 +1182,7 @@ function drawBlockVisual(
     spinAxis,
     spinAngle,
     color,
+    centerZ = 0,
   } = visual;
 
   context.save();
@@ -1170,6 +1203,7 @@ function drawBlockVisual(
         spinAxis,
         spinAngle,
         scale,
+        centerZ,
         moteLights,
       },
     );
@@ -1191,10 +1225,11 @@ function drawBlock(
   now: number,
   dimmed = false,
   moteLights: WebGLPointLight[] = [],
+  motion?: MotionPosition,
 ): void {
   drawBlockVisual(
     context,
-    blockVisual(cell, now, dimmed),
+    blockVisual(cell, now, dimmed, motion),
     assets,
     screenX,
     screenY,
@@ -1222,6 +1257,7 @@ function drawBlockVisualToWebGL(
     rotateZ: visual.rotateZ,
     spinAxis: visual.spinAxis,
     spinAngle: visual.spinAngle,
+    centerZ: visual.centerZ ?? 0,
   });
 }
 
@@ -1232,10 +1268,11 @@ function drawBlockToWebGL(
   screenY: number,
   now: number,
   dimmed: boolean,
+  motion?: MotionPosition,
 ): void {
   drawBlockVisualToWebGL(
     layer,
-    blockVisual(cell, now, dimmed),
+    blockVisual(cell, now, dimmed, motion),
     screenX,
     screenY,
   );
@@ -1386,7 +1423,7 @@ function renderWebGLBlocks(
         motion.y,
         snapshot.rise + snapshot.impactOffsetRows,
       );
-      drawBlockToWebGL(layer, cell, position.x, position.y, now, false);
+      drawBlockToWebGL(layer, cell, position.x, position.y, now, false, motion);
     }
   }
 
@@ -2444,6 +2481,7 @@ export function drawGame(
               now,
               false,
               moteLights,
+              motion,
             );
           }
         }

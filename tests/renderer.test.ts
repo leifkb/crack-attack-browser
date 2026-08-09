@@ -23,6 +23,7 @@ import {
   messagePulseAlpha,
   playfieldVisible,
   retainedGarbageVisual,
+  swapMotionTransform,
 } from "../app/game/renderGeometry.ts";
 import { scoreToBeat } from "../app/game/highScore.ts";
 
@@ -35,6 +36,28 @@ const BOARD_BOTTOM = 782;
 const VIEW_CENTER_X = BOARD_X + BOARD_WIDTH / 2;
 const VIEW_CENTER_Y = BOARD_BOTTOM - 4 * CELL_SIZE;
 const WORLD_UNITS_PER_PIXEL = 2 / CELL_SIZE;
+
+test("swapping blocks orbit their midpoint and flip through opposite depths", () => {
+  assert.deepEqual(swapMotionTransform(0, 1, 0), {
+    x: 0,
+    rotateY: 0,
+    centerZ: 0,
+  });
+
+  const leftHalfway = swapMotionTransform(0, 1, 0.5);
+  const rightHalfway = swapMotionTransform(1, 0, 0.5);
+  assert.ok(Math.abs(leftHalfway.x - 0.5) < 1e-12);
+  assert.ok(Math.abs(rightHalfway.x - 0.5) < 1e-12);
+  assert.ok(Math.abs(leftHalfway.rotateY - Math.PI / 2) < 1e-12);
+  assert.ok(Math.abs(rightHalfway.rotateY - Math.PI / 2) < 1e-12);
+  assert.ok(Math.abs(leftHalfway.centerZ - 1) < 1e-12);
+  assert.ok(Math.abs(rightHalfway.centerZ + 1) < 1e-12);
+
+  const complete = swapMotionTransform(0, 1, 1);
+  assert.ok(Math.abs(complete.x - 1) < 1e-12);
+  assert.equal(complete.rotateY, Math.PI);
+  assert.ok(Math.abs(complete.centerZ) < 1e-12);
+});
 
 const blockObj = readFileSync(
   new URL("../public/crack-attack-assets/block.obj", import.meta.url),
