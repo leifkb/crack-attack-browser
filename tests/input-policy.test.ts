@@ -36,10 +36,18 @@ test("game-over keyboard restart remains deliberate and delay-gated", () => {
 test("only actions available in the current game state are handled", () => {
   assert.equal(gameKeyboardAction({ status: "ready", key: "Tab" }), null);
   assert.equal(gameKeyboardAction({ status: "countdown", key: "ArrowDown" }), "move-down");
-  assert.equal(gameKeyboardAction({ status: "countdown", key: " " }), null);
+  assert.equal(gameKeyboardAction({ status: "countdown", key: " " }), "swap");
+  assert.equal(gameKeyboardAction({ status: "countdown", key: "Enter" }), "raise");
   assert.equal(gameKeyboardAction({ status: "paused", key: "ArrowDown" }), null);
   assert.equal(gameKeyboardAction({ status: "paused", key: "p" }), "pause");
+  assert.equal(gameKeyboardAction({ status: "paused", key: "Escape" }), "concede");
+  assert.equal(gameKeyboardAction({ status: "countdown", key: "Escape" }), null);
   assert.equal(gameKeyboardAction({ status: "playing", key: " " }), "swap");
+  assert.equal(gameKeyboardAction({ status: "playing", key: "Escape" }), "concede");
+  assert.equal(
+    gameKeyboardAction({ status: "playing", key: "Escape", repeat: true }),
+    null,
+  );
 });
 
 test("held movement keys wait for a fresh key edge instead of browser repeat", () => {

@@ -71,6 +71,50 @@ const IMPACT_SPRING_STIFFNESS = 0.1;
 const IMPACT_SPRING_DRAG = 0.1;
 const WORLD_UNITS_PER_ROW = 2;
 
+/**
+ * Crack Attack's Game::sqrt is intentionally a cheap polynomial rather than
+ * the standard-library square root. All of its UI fades pass values in [0, 1].
+ */
+export function sourceSqrtCurve(value: number): number {
+  const bounded = Math.max(0, Math.min(1, value));
+  return ((27 / 14) - (13 / 14) * bounded) * bounded;
+}
+
+export interface SoloHudStarVisual {
+  rotation: number;
+  alpha: number;
+}
+
+/** Reproduce WinRecord's accelerated play spin and lost-star meta animation. */
+export function soloHudStarVisual(
+  activeTicks: number,
+  gameOverTicks: number | null = null,
+): SoloHudStarVisual {
+  const playTicks = Math.max(0, Math.floor(activeTicks));
+  // Game::time_step starts at one. The first active tick therefore contributes
+  // 2/150 degrees, through time_step 150, before settling at one degree/tick.
+  const rampTicks = Math.min(playTicks, 149);
+  let rotationDegrees = (
+    ((rampTicks + 1) * (rampTicks + 2)) / 2 - 1
+  ) / 150 + Math.max(0, playTicks - 149);
+  let alpha = 1;
+
+  if (gameOverTicks !== null) {
+    const metaTicks = Math.max(0, Math.floor(gameOverTicks));
+    const turningTicks = Math.min(metaTicks, 223);
+    rotationDegrees += (
+      turningTicks * 224 - (turningTicks * (turningTicks + 1)) / 2
+    ) / 225;
+    const metaTimeStep = Math.min(225, 1 + metaTicks);
+    alpha = 1 - 0.6 * sourceSqrtCurve(metaTimeStep / 225);
+  }
+
+  return {
+    rotation: rotationDegrees * Math.PI / 180,
+    alpha,
+  };
+}
+
 export type BlockFlavor = 0 | 1 | 2 | 3 | 4 | 5;
 export type GameStatus = "ready" | "countdown" | "playing" | "paused" | "gameover";
 export type GarbageFlavor = "normal" | "gray";
@@ -589,6 +633,8 @@ export interface GameSnapshot {
   visualNow: number;
   boardVisualNow: number;
   headlightLevel: number;
+  hudStarRotation: number;
+  hudStarAlpha: number;
 }
 
 type Phase = "idle" | "swapping" | "clearing" | "falling" | "garbage";
@@ -866,6 +912,7 @@ export class CrackAttackEngine {
   private cursorCommandLockedUntil = 0;
   private queuedCursorMove: Coordinate | null = null;
   private queuedCursorSwap = false;
+  private queuedCursorSwapReadyAt = 0;
   private chainDepth = 0;
   private chainBaseScore = 0;
   private resolvingChain = false;
@@ -880,6 +927,7 @@ export class CrackAttackEngine {
   private loseBarFadeTicks = 0;
   private raiseHeld = false;
   private raiseToRowBoundary = false;
+  private concessionPending = false;
   private queuedAttacks: QueuedAttack[] = [];
   private attackSink: AttackSink | null;
   private randomState: number;
@@ -966,6 +1014,7 @@ export class CrackAttackEngine {
     this.cursorCommandLockedUntil = 0;
     this.queuedCursorMove = null;
     this.queuedCursorSwap = false;
+    this.queuedCursorSwapReadyAt = 0;
     this.chainDepth = 0;
     this.chainBaseScore = 0;
     this.resolvingChain = false;
@@ -980,6 +1029,7 @@ export class CrackAttackEngine {
     this.loseBarFadeTicks = 0;
     this.raiseHeld = false;
     this.raiseToRowBoundary = false;
+    this.concessionPending = false;
     this.queuedAttacks = [];
     this.creepLastFlavor = 0;
     this.creepSecondLastFlavor = 0;
@@ -1091,6 +1141,7 @@ export class CrackAttackEngine {
 
   private updatePlaying(now: number, delta: number): void {
     this.elapsedMs += delta;
+    if (this.raiseHeld) this.raiseToRowBoundary = true;
     this.pruneEffects(now);
     this.processQueuedCursorCommand(now);
 
@@ -1221,6 +1272,7 @@ export class CrackAttackEngine {
     // Game::timeStep advances Spring after grid motion, Creep, and queued
     // garbage processing. Keep that exact final position in the 20 ms tick.
     this.stepImpactSpring();
+    if (this.concessionPending) this.finishGame(now);
   }
 
   moveCursor(dx: number, dy: number, now = this.lastUpdate ?? 0): void {
@@ -1240,20 +1292,41 @@ export class CrackAttackEngine {
     // input and remains immediately swappable for taps and horizontal swipes.
     this.queuedCursorMove = null;
     this.queuedCursorSwap = false;
+    this.queuedCursorSwapReadyAt = 0;
     this.cursorCommandLockedUntil = 0;
     this.moveCursorTo(x, y, now);
   }
 
   swap(now: number): boolean {
+    if (this.status === "countdown") {
+      // Controller retains a held swap throughout the opening. Swapper sees
+      // it on the tick after CountDownManager releases its play lock because
+      // Swapper runs immediately before the countdown manager in each tick.
+      this.queuedCursorMove = null;
+      this.queuedCursorSwap = true;
+      this.queuedCursorSwapReadyAt = this.countdownUntil + SIMULATION_STEP_MS;
+      return false;
+    }
     if (this.status !== "playing") return false;
     this.processQueuedCursorCommand(now);
     if (now < this.cursorCommandLockedUntil) {
       this.queuedCursorMove = null;
       this.queuedCursorSwap = true;
+      this.queuedCursorSwapReadyAt = 0;
       return true;
     }
     if (this.swapInputLocked(now)) return false;
     return this.performSwap(now);
+  }
+
+  releaseCountdownSwap(): void {
+    if (
+      this.status === "countdown"
+      || (this.status === "paused" && this.statusBeforePause === "countdown")
+    ) {
+      this.queuedCursorSwap = false;
+      this.queuedCursorSwapReadyAt = 0;
+    }
   }
 
   private performSwap(now: number): boolean {
@@ -1324,12 +1397,20 @@ export class CrackAttackEngine {
   }
 
   setRaiseHeld(held: boolean): void {
+    if (held && this.status === "countdown") {
+      this.raiseHeld = true;
+      return;
+    }
     if (held && this.status === "playing") {
       this.raiseHeld = true;
       this.raiseToRowBoundary = true;
       return;
     }
     this.raiseHeld = false;
+    if (
+      this.status === "countdown"
+      || (this.status === "paused" && this.statusBeforePause === "countdown")
+    ) this.raiseToRowBoundary = false;
   }
 
   togglePause(now: number): void {
@@ -1353,6 +1434,26 @@ export class CrackAttackEngine {
       this.lastUpdate = now;
       this.pausedAt = 0;
     }
+  }
+
+  concede(now: number): boolean {
+    const canConcede = this.status === "playing"
+      || (this.status === "paused" && this.statusBeforePause === "playing");
+    if (!canConcede) return false;
+
+    if (this.status === "paused") {
+      // Preserve the frozen board when ending from Pause. The desktop can
+      // concede while paused, but none of its gameplay clocks advance first.
+      this.shiftTimers(Math.max(0, now - this.pausedAt));
+      this.status = "playing";
+      this.lastUpdate = now;
+      this.pausedAt = 0;
+      this.finishGame(now);
+    } else {
+      this.update(now);
+      if (this.status === "playing") this.concessionPending = true;
+    }
+    return true;
   }
 
   receiveAttack(attack: AttackPayload): void {
@@ -1385,9 +1486,11 @@ export class CrackAttackEngine {
         visualNow - (this.countdownUntil - COUNTDOWN_START_DELAY_MS),
       );
       // LightManager scales both the playfield headlight's diffuse and
-      // specular colors by sqrt(elapsed / opening-delay). Reward-mote lights
+      // specular colors by Game::sqrt(elapsed / opening-delay). Reward-mote lights
       // remain independent and are added by the renderer after this level.
-      headlightLevel = Math.sqrt(Math.min(1, elapsed / COUNTDOWN_START_DELAY_MS));
+      headlightLevel = sourceSqrtCurve(
+        Math.min(1, elapsed / COUNTDOWN_START_DELAY_MS),
+      );
       if (elapsed < COUNTDOWN_SEGMENT_MS) {
         countdown = "3";
         countdownProgress = elapsed / COUNTDOWN_SEGMENT_MS;
@@ -1416,6 +1519,7 @@ export class CrackAttackEngine {
     const scoreFadeProgress = this.scoreFadeInitialTicks > 0
       ? 1 - scoreFadeTicks / this.scoreFadeInitialTicks
       : 1;
+    const hudStar = this.soloHudStarVisualAt(visualNow);
     return {
       board: this.board,
       nextRow: this.nextRow,
@@ -1483,6 +1587,8 @@ export class CrackAttackEngine {
       visualNow,
       boardVisualNow,
       headlightLevel,
+      hudStarRotation: hudStar.rotation,
+      hudStarAlpha: hudStar.alpha,
     };
   }
 
@@ -1718,18 +1824,6 @@ export class CrackAttackEngine {
     } else {
       combo = this.createCombo(now);
       this.legacyComboId = combo.id;
-    }
-    if (continuation && effectivePatterns.length > 1) {
-      for (const pattern of effectivePatterns) {
-        this.startClearForCombo(
-          pattern.coordinates,
-          [pattern],
-          combo,
-          true,
-          now,
-        );
-      }
-      return;
     }
     this.startClearForCombo(matches, effectivePatterns, combo, continuation, now);
   }
@@ -2139,6 +2233,7 @@ export class CrackAttackEngine {
     if (this.messageUntil > 0) this.messageUntil += duration;
     if (this.cursorMoveStarted !== null) this.cursorMoveStarted += duration;
     if (this.cursorCommandLockedUntil > 0) this.cursorCommandLockedUntil += duration;
+    if (this.queuedCursorSwapReadyAt > 0) this.queuedCursorSwapReadyAt += duration;
     for (const attack of this.queuedAttacks) attack.dropAt += duration;
     for (const sign of this.rewardSigns) {
       sign.startedAt += duration;
@@ -2198,7 +2293,7 @@ export class CrackAttackEngine {
   private startDetectedMatches(
     result: MatchResult,
     now: number,
-    swapCauseCellIds?: ReadonlySet<number>,
+    sharedCauseCellIds?: ReadonlySet<number>,
   ): void {
     if (result.patterns.length === 0) return;
     const grouped = new Map<string, {
@@ -2215,21 +2310,19 @@ export class CrackAttackEngine {
         })
         .find((id): id is number => id !== undefined && this.combos.has(id));
       const combo = comboId === undefined ? null : this.combos.get(comboId) ?? null;
-      const causedBySwap = swapCauseCellIds !== undefined
+      const causedBySharedAction = sharedCauseCellIds !== undefined
         && pattern.coordinates.some(({ x, y }) => {
           const cell = this.board[y]?.[x] ?? null;
-          return cell?.kind === "block" && swapCauseCellIds.has(cell.id);
+          return cell?.kind === "block" && sharedCauseCellIds.has(cell.id);
         });
-      // Both blocks in one completed swap share a magnitude tally in the
-      // original game. Keep fresh patterns from that swap together, so (for
-      // example) two separate triples score and attack as one six-block
-      // elimination. Late patterns remain individual eliminations even when
-      // they share a combo: two falling triples advance it to 2x and then 3x,
-      // but neither becomes a magnitude-six clear.
+      // ComboTabulator owns one magnitude tally per simulation tick. Both
+      // blocks in a swap, every newly inserted creep block, and every block
+      // carrying the same active combo therefore aggregate their same-tick
+      // patterns before ComboManager scores or generates garbage.
       const key = combo
-        ? `combo:${combo.id}:pattern:${index}`
-        : causedBySwap
-          ? "swap"
+        ? `combo:${combo.id}`
+        : causedBySharedAction
+          ? "shared-action"
           : `new:${index}`;
       const entry = grouped.get(key) ?? {
         combo,
@@ -2254,7 +2347,7 @@ export class CrackAttackEngine {
     }
   }
 
-  private resolveMatches(now: number, swapCauseCellIds?: ReadonlySet<number>): void {
+  private resolveMatches(now: number, sharedCauseCellIds?: ReadonlySet<number>): void {
     // A falling block is drawn over its destination but has not joined the
     // grid there yet. Hide moving cells from detection so a settled line can
     // clear beside one without accidentally including—or waiting for—it.
@@ -2268,7 +2361,7 @@ export class CrackAttackEngine {
     const motionPending = now < this.backgroundSwapUntil
       || now < this.backgroundFallUntil;
     if (matches.coordinates.length > 0) {
-      this.startDetectedMatches(matches, now, swapCauseCellIds);
+      this.startDetectedMatches(matches, now, sharedCauseCellIds);
     }
 
     for (let y = 0; y < this.board.length; y += 1) {
@@ -2613,7 +2706,11 @@ export class CrackAttackEngine {
         }
       }
     }
-    this.board.unshift(this.nextRow);
+    const insertedRow = this.nextRow;
+    const insertedBlockIds = new Set(
+      insertedRow.flatMap((cell) => cell?.kind === "block" ? [cell.id] : []),
+    );
+    this.board.unshift(insertedRow);
     // The board and the swapper share the creep offset in the original. When
     // that offset wraps, both logical grid coordinates advance together; it
     // is not a new cursor movement and must not start a glide animation.
@@ -2622,7 +2719,9 @@ export class CrackAttackEngine {
     this.nextRow = this.generateCreepRow();
     this.events.push({ type: "rise" });
 
-    this.resolveMatches(now);
+    // Creep creates one ComboTabulator and associates all six row checks with
+    // it. Independent lines made by this insertion share one magnitude tally.
+    this.resolveMatches(now, insertedBlockIds);
   }
 
   private dropGarbage(attack: QueuedAttack, now: number): boolean {
@@ -3054,7 +3153,14 @@ export class CrackAttackEngine {
     if (this.cursorInputLocked(now)) return;
 
     if (this.queuedCursorSwap) {
+      // A held countdown swap remains pending until play begins or its key /
+      // pointer is released. Movement can still animate underneath the lock.
+      if (
+        this.status === "countdown"
+        || now < this.queuedCursorSwapReadyAt
+      ) return;
       this.queuedCursorSwap = false;
+      this.queuedCursorSwapReadyAt = 0;
       this.queuedCursorMove = null;
       if (this.status === "playing") this.performSwap(now);
       return;
@@ -3086,6 +3192,27 @@ export class CrackAttackEngine {
       Math.max(0, now - this.gameOverAt) / SIMULATION_STEP_MS,
     );
     return Math.max(0, this.scoreFadeTicks - metaTicks);
+  }
+
+  private soloHudStarVisualAt(visualNow: number): SoloHudStarVisual {
+    let activeTicks = 0;
+    const pausedDuringCountdown = this.status === "paused"
+      && this.statusBeforePause === "countdown";
+    if (this.status === "countdown" || pausedDuringCountdown) {
+      const runStartedAt = this.countdownUntil - COUNTDOWN_START_DELAY_MS;
+      activeTicks = Math.floor(
+        Math.max(0, visualNow - runStartedAt) / SIMULATION_STEP_MS,
+      );
+    } else if (this.status !== "ready") {
+      // The countdown consumes 149 pre-play ticks; updatePlaying owns the
+      // boundary tick and every later active tick in elapsedMs.
+      activeTicks = COUNTDOWN_START_DELAY_MS / SIMULATION_STEP_MS - 1
+        + Math.floor(this.elapsedMs / SIMULATION_STEP_MS);
+    }
+    const gameOverTicks = this.status === "gameover"
+      ? Math.floor(Math.max(0, visualNow - this.gameOverAt) / SIMULATION_STEP_MS)
+      : null;
+    return soloHudStarVisual(activeTicks, gameOverTicks);
   }
 
   private moveCursorTo(x: number, y: number, now: number): void {
@@ -3350,12 +3477,14 @@ export class CrackAttackEngine {
     this.gameOverAt = now;
     this.raiseHeld = false;
     this.raiseToRowBoundary = false;
+    this.concessionPending = false;
     // Score::gameFinish records only points that have rolled into Score::score.
     // Pending backlog is deliberately not awarded when play ends.
     this.score = this.displayScore;
     this.scoreBacklog = 0;
     this.queuedCursorMove = null;
     this.queuedCursorSwap = false;
+    this.queuedCursorSwapReadyAt = 0;
     this.events.push({ type: "gameover" });
   }
 }

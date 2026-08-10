@@ -318,6 +318,7 @@ export default function CrackAttackGame() {
   const canvasGestureRef = useRef<CanvasGesture | null>(null);
   const thumbpadGestureRef = useRef<ThumbpadGesture | null>(null);
   const suppressThumbpadClickRef = useRef(false);
+  const swapPointerRef = useRef<number | null>(null);
   const raisePointerRef = useRef<number | null>(null);
   const [snapshot, setSnapshot] = useState<GameSnapshot>(() => engine.getSnapshot(0));
   const lastPublishedRef = useRef({
@@ -585,10 +586,15 @@ export default function CrackAttackGame() {
       else if (action === "swap") swap();
       else if (action === "raise") engine.setRaiseHeld(true);
       else if (action === "pause") pauseRun();
+      else if (action === "concede") {
+        engine.concede(now);
+        setSnapshot(engine.getSnapshot(now));
+      }
     };
     const onKeyUp = (event: KeyboardEvent) => {
       const key = event.key.toLowerCase();
       if (key === "enter" || key === "l") engine.setRaiseHeld(false);
+      if (key === " " || key === "k") engine.releaseCountdownSwap();
     };
     window.addEventListener("keydown", onKeyDown, { passive: false });
     window.addEventListener("keyup", onKeyUp);
@@ -612,6 +618,10 @@ export default function CrackAttackGame() {
 
   useEffect(() => {
     const cancelPointer = (event: PointerEvent) => {
+      if (swapPointerRef.current === event.pointerId) {
+        swapPointerRef.current = null;
+        engine.releaseCountdownSwap();
+      }
       if (raisePointerRef.current === event.pointerId) {
         raisePointerRef.current = null;
         engine.setRaiseHeld(false);
@@ -625,10 +635,12 @@ export default function CrackAttackGame() {
       }
     };
     const cancelAllPointers = () => {
+      swapPointerRef.current = null;
       raisePointerRef.current = null;
       thumbpadGestureRef.current = null;
       canvasGestureRef.current = null;
       engine.setRaiseHeld(false);
+      engine.releaseCountdownSwap();
       setThumbpadVisual(IDLE_THUMBPAD_VISUAL);
     };
     window.addEventListener("pointerup", cancelPointer);
@@ -904,12 +916,33 @@ export default function CrackAttackGame() {
 
   const pressSwap = (event: React.PointerEvent<HTMLButtonElement>) => {
     if (event.pointerType === "mouse" && event.button !== 0) return;
+    if (swapPointerRef.current !== null) return;
+    swapPointerRef.current = event.pointerId;
 
     // Handle physical pointers on pointerdown instead of waiting for click.
     // Browsers can defer or suppress a touch-generated click while a different
     // pointer remains captured by the movement pad; pointer events themselves
     // remain independent, so this keeps Swap genuinely multi-touch.
     attemptSwap(event.pointerType !== "mouse");
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Holding still works while the pointer remains over the button.
+    }
+    event.preventDefault();
+  };
+
+  const releaseSwap = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (swapPointerRef.current !== event.pointerId) return;
+    swapPointerRef.current = null;
+    engine.releaseCountdownSwap();
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // Capture may already have been released by the browser.
+    }
     event.preventDefault();
   };
 
@@ -917,7 +950,10 @@ export default function CrackAttackGame() {
     // Pointer activation was already handled above. A detail of zero denotes
     // keyboard or assistive-technology activation, which still needs a click
     // path for the native button to remain accessible.
-    if (event.detail === 0) attemptSwap();
+    if (event.detail === 0) {
+      attemptSwap();
+      engine.releaseCountdownSwap();
+    }
   };
 
   const toggleSound = (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -1019,6 +1055,7 @@ export default function CrackAttackGame() {
             <span><kbd>Space</kbd> swap</span>
             <span><kbd>Enter</kbd> raise</span>
             <span><kbd>P</kbd> pause</span>
+            <span><kbd>Esc</kbd> concede</span>
           </p>
 
           <p className="touch-hint" id="touch-control-hint">
@@ -1095,6 +1132,9 @@ export default function CrackAttackGame() {
               type="button"
               className="console-button swap-button"
               onPointerDown={pressSwap}
+              onPointerUp={releaseSwap}
+              onPointerCancel={releaseSwap}
+              onLostPointerCapture={releaseSwap}
               onClick={clickSwap}
             >
               <span>Swap</span>

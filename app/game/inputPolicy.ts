@@ -17,6 +17,7 @@ export type GameKeyboardAction =
   | "swap"
   | "raise"
   | "pause"
+  | "concede"
   | null;
 
 interface KeyboardActionOptions {
@@ -63,7 +64,9 @@ export function gameKeyboardAction({
       : null;
   }
   if (status === "paused") {
-    return normalized === "p" && !repeat ? "pause" : null;
+    if (repeat) return null;
+    if (normalized === "p") return "pause";
+    return normalized === "escape" ? "concede" : null;
   }
 
   if (normalized === "p" && !repeat) return "pause";
@@ -71,9 +74,10 @@ export function gameKeyboardAction({
   if ((normalized === "arrowright" || normalized === "d") && !repeat) return "move-right";
   if ((normalized === "arrowup" || normalized === "w") && !repeat) return "move-up";
   if ((normalized === "arrowdown" || normalized === "s") && !repeat) return "move-down";
-  if (status !== "playing") return null;
   if ((normalized === " " || normalized === "k") && !repeat) return "swap";
   if (normalized === "enter" || normalized === "l") return "raise";
+  if (status !== "playing") return null;
+  if (normalized === "escape" && !repeat) return "concede";
   return null;
 }
 

@@ -43,6 +43,12 @@ function clamp(value: number, min = 0, max = 1): number {
   return Math.max(min, Math.min(max, value));
 }
 
+/** Game::sqrt's deliberately inexpensive fade curve. */
+export function sourceSqrtCurve(value: number): number {
+  const bounded = clamp(value);
+  return ((27 / 14) - (13 / 14) * bounded) * bounded;
+}
+
 export function doubleTriangularFlash(progress: number): number {
   const phase = clamp(progress) * 4;
   return 1 - Math.abs((phase % 2) - 1);
@@ -114,8 +120,8 @@ export function levelLightColor(
   impactFlash = 0,
 ): Color3 {
   const blend = clamp(typeof occupancy === "boolean" ? (occupancy ? 1 : 0) : occupancy);
-  const redEnergy = Math.sqrt(blend);
-  const blueEnergy = Math.sqrt(1 - blend);
+  const redEnergy = sourceSqrtCurve(blend);
+  const blueEnergy = sourceSqrtCurve(1 - blend);
   const base: Color3 = [
     LEVEL_LIGHT_RED[0] * redEnergy + LEVEL_LIGHT_BLUE[0] * blueEnergy,
     LEVEL_LIGHT_RED[1] * redEnergy + LEVEL_LIGHT_BLUE[1] * blueEnergy,
@@ -144,7 +150,7 @@ export function countdownVisual(
   const lambda = 1 - elapsed;
   if (label === "GO!") {
     return {
-      alpha: lambda > 0.8 ? 1 : Math.sqrt(lambda / 0.8),
+      alpha: lambda > 0.8 ? 1 : sourceSqrtCurve(lambda / 0.8),
       scale: 7,
       verticalBlend: 0,
     };
