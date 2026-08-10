@@ -25,6 +25,8 @@ export const AWAKEN_POP_DURATION_MS = 240;
 export const CURSOR_MOVE_DURATION_MS = 120;
 export const COUNTDOWN_SEGMENT_MS = 50 * 20;
 export const COUNTDOWN_START_DELAY_MS = 150 * 20;
+// CountDownManager plays its cue when each 50-tick message has 30 ticks left.
+export const COUNTDOWN_CUE_DELAY_MS = 21 * 20;
 // CelebrationManager's loss sign reaches its final resting state after 194
 // meta ticks. Until then, the original ignores input that would leave the
 // celebration screen.
@@ -57,6 +59,7 @@ export const LOSE_BAR_FADE_TICKS = 20;
 // The original simulation consumes every elapsed 20 ms tick. Rendering may
 // skip frames, but gameplay time is never discarded when a frame is late.
 const SIMULATION_STEP_MS = 20;
+const CREEP_STEPS_PER_ROW = 60;
 // Game::time_step advances throughout the 150-tick opening pause. Creep's
 // first speed alarm is therefore already 149 ticks old when play begins.
 const CREEP_GAME_CLOCK_OFFSET_MS = COUNTDOWN_START_DELAY_MS - SIMULATION_STEP_MS;
@@ -581,6 +584,7 @@ interface QueuedAttack extends AttackPayload {
 
 export type GameEvent =
   | { type: "swap" }
+  | { type: "block-land"; count: number }
   | { type: "clear"; magnitude: number; gray: boolean }
   | { type: "chain"; depth: number }
   | { type: "garbage" }
@@ -588,6 +592,7 @@ export type GameEvent =
   | { type: "awaken"; flavor: BlockFlavor; sequence: number }
   | { type: "danger" }
   | { type: "rise" }
+  | { type: "countdown-cue"; remaining: 0 | 1 | 2 | 3 }
   | { type: "start" }
   | { type: "gameover" };
 
@@ -890,6 +895,7 @@ export class CrackAttackEngine {
   private lastUpdate: number | null = null;
   private simulationRemainderMs = 0;
   private countdownUntil = 0;
+  private countdownCueIndex = 0;
   private gameOverAt = 0;
   private score = 0;
   private displayScore = 0;
@@ -927,6 +933,7 @@ export class CrackAttackEngine {
   private loseBarFadeTicks = 0;
   private raiseHeld = false;
   private raiseToRowBoundary = false;
+  private creepShiftPending = false;
   private concessionPending = false;
   private queuedAttacks: QueuedAttack[] = [];
   private attackSink: AttackSink | null;
@@ -995,6 +1002,7 @@ export class CrackAttackEngine {
     this.lastUpdate = null;
     this.simulationRemainderMs = 0;
     this.countdownUntil = 0;
+    this.countdownCueIndex = 0;
     this.gameOverAt = 0;
     this.score = 0;
     this.displayScore = 0;
@@ -1029,6 +1037,7 @@ export class CrackAttackEngine {
     this.loseBarFadeTicks = 0;
     this.raiseHeld = false;
     this.raiseToRowBoundary = false;
+    this.creepShiftPending = false;
     this.concessionPending = false;
     this.queuedAttacks = [];
     this.creepLastFlavor = 0;
@@ -1096,6 +1105,7 @@ export class CrackAttackEngine {
     }
     this.status = "countdown";
     this.countdownUntil = now + COUNTDOWN_START_DELAY_MS;
+    this.countdownCueIndex = 0;
     this.lastUpdate = now;
     this.simulationRemainderMs = 0;
     this.syncLevelLights(now);
@@ -1106,6 +1116,10 @@ export class CrackAttackEngine {
     if (this.lastUpdate === null) this.lastUpdate = now;
     const previousUpdate = this.lastUpdate;
     this.lastUpdate = now;
+
+    if (this.status === "countdown" || this.status === "playing") {
+      this.emitDueCountdownCues(now);
+    }
 
     if (this.status === "countdown") {
       // Swapper keeps receiving movement input during the opening countdown,
@@ -1139,9 +1153,24 @@ export class CrackAttackEngine {
     }
   }
 
+  private emitDueCountdownCues(now: number): void {
+    if (this.countdownUntil <= 0) return;
+    const countdownStartedAt = this.countdownUntil - COUNTDOWN_START_DELAY_MS;
+    while (this.countdownCueIndex < 4) {
+      const cueAt = countdownStartedAt
+        + COUNTDOWN_CUE_DELAY_MS
+        + this.countdownCueIndex * COUNTDOWN_SEGMENT_MS;
+      if (now < cueAt) break;
+      this.events.push({
+        type: "countdown-cue",
+        remaining: (3 - this.countdownCueIndex) as 0 | 1 | 2 | 3,
+      });
+      this.countdownCueIndex += 1;
+    }
+  }
+
   private updatePlaying(now: number, delta: number): void {
     this.elapsedMs += delta;
-    if (this.raiseHeld) this.raiseToRowBoundary = true;
     this.pruneEffects(now);
     this.processQueuedCursorCommand(now);
 
@@ -1221,33 +1250,62 @@ export class CrackAttackEngine {
     // violation tick. It returns early only on later frozen ticks or while
     // blocks are dying/awakening; other animations do not stop the pressure.
     if ((!inDanger || startedDangerThisTick) && !eliminationActive) {
-      const manualRaiseActive = this.raiseHeld || this.raiseToRowBoundary;
-      const rowsPerSecond = creepRowsPerSecond(
-        this.elapsedMs + CREEP_GAME_CLOCK_OFFSET_MS,
-        manualRaiseActive,
-      );
-      const riseDelta = rowsPerSecond * (delta / 1000);
+      // Creep samples the physical command only after its early-return checks.
+      // A held command therefore carries through a clear or danger freeze, but
+      // a press released entirely during one of those phases is ignored.
+      if (this.raiseHeld) this.raiseToRowBoundary = true;
 
-      // Releasing Raise commits the already-started movement through the next
-      // complete row. Cap that final step at the wrap point so a quick tap never
-      // leaves the stack (or cursor) parked at a fractional manual offset.
-      if (this.raiseToRowBoundary && !this.raiseHeld) {
-        this.rise = Math.min(1, this.rise + riseDelta);
-      } else {
-        this.rise += riseDelta;
+      const retriedPendingShift = this.creepShiftPending;
+      if (retriedPendingShift) {
+        if (this.insertCreepRow(now)) {
+          this.creepShiftPending = false;
+          this.rise = 0;
+          if (this.raiseToRowBoundary && !this.raiseHeld) {
+            this.raiseToRowBoundary = false;
+          }
+        } else {
+          // Grid::shiftGridUp leaves the board untouched and parks Creep one
+          // sub-step below the boundary so it can retry when space is safe.
+          this.rise = (CREEP_STEPS_PER_ROW - 1) / CREEP_STEPS_PER_ROW;
+        }
       }
 
-      while (
-        this.rise >= 1
-        && this.status === "playing"
-        && !this.hasActiveClears()
-        && this.awakeningCount() === 0
-      ) {
-        this.rise -= 1;
-        this.insertCreepRow(now);
+      if (!retriedPendingShift) {
+        const manualRaiseActive = this.raiseHeld || this.raiseToRowBoundary;
+        const rowsPerSecond = creepRowsPerSecond(
+          this.elapsedMs + CREEP_GAME_CLOCK_OFFSET_MS,
+          manualRaiseActive,
+        );
+        const riseDelta = rowsPerSecond * (delta / 1000);
+
+        // Releasing Raise commits the already-started movement through the next
+        // complete row. Cap that final step at the wrap point so a quick tap never
+        // leaves the stack (or cursor) parked at a fractional manual offset.
         if (this.raiseToRowBoundary && !this.raiseHeld) {
-          this.raiseToRowBoundary = false;
-          this.rise = 0;
+          this.rise = Math.min(1, this.rise + riseDelta);
+        } else {
+          this.rise += riseDelta;
+        }
+
+        while (
+          this.rise >= 1
+          && this.status === "playing"
+          && !this.hasActiveClears()
+          && this.awakeningCount() === 0
+        ) {
+          this.rise -= 1;
+          if (!this.insertCreepRow(now)) {
+            this.creepShiftPending = true;
+            this.rise = (CREEP_STEPS_PER_ROW - 1) / CREEP_STEPS_PER_ROW;
+            if (this.raiseToRowBoundary && !this.raiseHeld) {
+              this.raiseToRowBoundary = false;
+            }
+            break;
+          }
+          if (this.raiseToRowBoundary && !this.raiseHeld) {
+            this.raiseToRowBoundary = false;
+            this.rise = 0;
+          }
         }
       }
     }
@@ -1403,7 +1461,13 @@ export class CrackAttackEngine {
     }
     if (held && this.status === "playing") {
       this.raiseHeld = true;
-      this.raiseToRowBoundary = true;
+      // Preserve responsive sub-tick browser taps during ordinary play, while
+      // matching Creep's early return during eliminations and danger freezes.
+      if (
+        !this.hasActiveClears()
+        && this.awakeningCount() === 0
+        && !this.dangerActive
+      ) this.raiseToRowBoundary = true;
       return;
     }
     this.raiseHeld = false;
@@ -1627,11 +1691,38 @@ export class CrackAttackEngine {
   }
 
   private finishBackgroundFall(now: number): void {
-    if (this.backgroundFallUntil <= 0 || now < this.backgroundFallUntil) return;
-    this.backgroundFallUntil = 0;
+    if (this.backgroundFallUntil <= 0) return;
+
+    const dueCells: Cell[] = [];
+    const dueBlockIds = new Set<number>();
+    for (let y = 0; y < this.board.length; y += 1) {
+      for (let x = 0; x < BOARD_COLUMNS; x += 1) {
+        const cell = this.board[y][x];
+        const deadline = this.verticalFallDeadline(cell, x, y);
+        if (deadline === null || deadline > now) continue;
+        dueCells.push(cell as Cell);
+        if (cell?.kind === "block") dueBlockIds.add(cell.id);
+      }
+    }
+
+    const reachedBackgroundDeadline = now >= this.backgroundFallUntil;
+    if (dueCells.length === 0 && !reachedBackgroundDeadline) return;
+    if (reachedBackgroundDeadline) this.backgroundFallUntil = 0;
+    for (const cell of dueCells) this.clearMotion(cell);
+
     const fallDuration = this.applyGravity(now);
     if (fallDuration > 0) this.scheduleFall(now, fallDuration);
-    else this.resolveMatches(now);
+    const landedBlockCount = this.board.reduce((count, row) => (
+      count + row.filter((cell) => (
+        cell?.kind === "block"
+        && dueBlockIds.has(cell.id)
+        && !this.cellIsMoving(cell, now)
+      )).length
+    ), 0);
+    if (landedBlockCount > 0) {
+      this.events.push({ type: "block-land", count: landedBlockCount });
+    }
+    this.resolveMatches(now);
     this.refreshPhase(now);
   }
 
@@ -2684,12 +2775,11 @@ export class CrackAttackEngine {
     });
   }
 
-  private insertCreepRow(now: number): void {
-    const displaced = this.board.pop();
-    if (displaced?.some(Boolean)) {
-      this.finishGame(now);
-      return;
-    }
+  private insertCreepRow(now: number): boolean {
+    // Grid::shiftGridUp refuses the shift before mutating anything when its
+    // backing row is occupied. Loss remains governed by the safe-height timer.
+    if (this.board[this.board.length - 1]?.some(Boolean)) return false;
+    this.board.pop();
 
     // Grid::shiftGridUp moves active pieces and their animations together.
     // Shifting an interpolation's origin with its logical destination avoids
@@ -2722,6 +2812,7 @@ export class CrackAttackEngine {
     // Creep creates one ComboTabulator and associates all six row checks with
     // it. Independent lines made by this insertion share one magnitude tally.
     this.resolveMatches(now, insertedBlockIds);
+    return true;
   }
 
   private dropGarbage(attack: QueuedAttack, now: number): boolean {
@@ -2919,6 +3010,30 @@ export class CrackAttackEngine {
     cell.animationStarted = now;
     cell.animationDuration = duration;
     cell.animationDelay = delay;
+  }
+
+  private verticalFallDeadline(
+    cell: Cell | null,
+    x: number,
+    targetY: number,
+  ): number | null {
+    if (
+      cell === null
+      || cell.state !== "idle"
+      || cell.animationStarted === undefined
+      || cell.animationDuration === undefined
+      || (cell.animationFromX ?? x) !== x
+      || (cell.animationFromY ?? targetY) <= targetY
+    ) return null;
+    return cell.animationStarted + cell.animationDuration;
+  }
+
+  private clearMotion(cell: Cell): void {
+    delete cell.animationFromX;
+    delete cell.animationFromY;
+    delete cell.animationStarted;
+    delete cell.animationDuration;
+    delete cell.animationDelay;
   }
 
   private isVerticalFallMotion(

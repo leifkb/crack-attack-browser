@@ -8,6 +8,7 @@ import {
   BLOCK_CLEAR_DURATION_MS,
   BOARD_COLUMNS,
   BUFFER_ROWS,
+  COUNTDOWN_CUE_DELAY_MS,
   COUNTDOWN_SEGMENT_MS,
   COUNTDOWN_START_DELAY_MS,
   CURSOR_MOVE_DURATION_MS,
@@ -92,6 +93,9 @@ interface EngineHarness {
   simulationRemainderMs: number;
   phaseUntil: number;
   rise: number;
+  raiseHeld: boolean;
+  raiseToRowBoundary: boolean;
+  creepShiftPending: boolean;
   score: number;
   displayScore: number;
   previousDisplayScore: number;
@@ -127,7 +131,7 @@ interface EngineHarness {
     patterns?: MatchPattern[],
   ): void;
   resolveMatches(now: number, swapCauseCellIds?: ReadonlySet<number>): void;
-  insertCreepRow(now: number): void;
+  insertCreepRow(now: number): boolean;
   finishClear(now: number): void;
   random(): number;
   generateCreepRow(): Array<Cell | null>;
@@ -729,6 +733,45 @@ test("one creep insertion shares its magnitude across every new line", () => {
   assert.equal(snapshot.incomingCount, 1);
 });
 
+test("an occupied backing row stalls creep without deleting cells or ending play", () => {
+  const engine = new CrackAttackEngine({ seed: 0x66756c6c });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  const topBlock = block(1090, 4);
+  board[BUFFER_ROWS - 1][0] = topBlock;
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.lastUpdate = 1000;
+  internals.rise = 0.99;
+  const initialCursorY = engine.getSnapshot(1000).cursorY;
+
+  engine.setRaiseHeld(true);
+  engine.setRaiseHeld(false);
+  engine.update(1020);
+
+  let snapshot = engine.getSnapshot(1020);
+  assert.equal(snapshot.status, "playing");
+  assert.equal(snapshot.board[BUFFER_ROWS - 1][0], topBlock);
+  assert.equal(snapshot.cursorY, initialCursorY);
+  assert.equal(snapshot.rise, 59 / 60);
+  assert.equal(internals.creepShiftPending, true);
+  const blockedEvents = engine.drainEvents();
+  assert.ok(!blockedEvents.some((event) => event.type === "gameover"));
+  assert.ok(!blockedEvents.some((event) => event.type === "rise"));
+
+  // Once the impossible backing-row occupant is gone, the parked shift is
+  // retried on the next eligible Creep tick rather than waiting a full row.
+  internals.board[BUFFER_ROWS - 1][0] = null;
+  engine.update(1040);
+  snapshot = engine.getSnapshot(1040);
+  assert.equal(snapshot.status, "playing");
+  assert.equal(snapshot.cursorY, initialCursorY + 1);
+  assert.equal(snapshot.rise, 0);
+  assert.equal(internals.creepShiftPending, false);
+  assert.ok(engine.drainEvents().some((event) => event.type === "rise"));
+});
+
 test("creep rows use persistent history instead of the current live stack", () => {
   const engine = new CrackAttackEngine({ seed: 0x87654321 });
   const internals = harness(engine);
@@ -1076,6 +1119,26 @@ test("the opening uses three one-second counts followed by Fight during play", (
   snapshot = engine.getSnapshot(3100 + COUNTDOWN_SEGMENT_MS - 1);
   assert.equal(snapshot.countdown, "GO!");
   assert.equal(engine.getSnapshot(3100 + COUNTDOWN_SEGMENT_MS).countdown, null);
+});
+
+test("the opening emits the original four countdown cues on their source ticks", () => {
+  const engine = new CrackAttackEngine({ seed: 0x62656570 });
+  const startedAt = 100;
+  engine.start(startedAt);
+
+  ([3, 2, 1, 0] as const).forEach((remaining, index) => {
+    const cueAt = startedAt + COUNTDOWN_CUE_DELAY_MS + index * COUNTDOWN_SEGMENT_MS;
+    engine.update(cueAt - 1);
+    assert.deepEqual(
+      engine.drainEvents().filter((event) => event.type === "countdown-cue"),
+      [],
+    );
+    engine.update(cueAt);
+    assert.deepEqual(
+      engine.drainEvents().filter((event) => event.type === "countdown-cue"),
+      [{ type: "countdown-cue", remaining }],
+    );
+  });
 });
 
 test("held Swap and Raise carry through the opening lock", () => {
@@ -1637,6 +1700,63 @@ test("falling visuals take their first third-step on the source tick", () => {
   assert.equal(fallMotionProgress(immediate, 2, 0, 1040), 1);
 });
 
+test("a short fall resolves its match before an unrelated longer fall lands", () => {
+  const engine = new CrackAttackEngine({ seed: 0x6c616e64 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  board[0][0] = block(560, 2);
+  board[0][1] = block(561, 2);
+
+  const shortFall = block(562, 2);
+  shortFall.animationFromX = 2;
+  shortFall.animationFromY = 1;
+  shortFall.animationStarted = 1000;
+  shortFall.animationDelay = 0;
+  shortFall.animationDuration = 60;
+  board[0][2] = shortFall;
+
+  const longFall = block(563, 4);
+  longFall.animationFromX = 5;
+  longFall.animationFromY = 4;
+  longFall.animationStarted = 1000;
+  longFall.animationDelay = 0;
+  longFall.animationDuration = 240;
+  board[0][5] = longFall;
+
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "falling";
+  internals.phaseUntil = 1240;
+  internals.backgroundFallUntil = 1240;
+  internals.lastUpdate = 1000;
+
+  engine.update(1059);
+  assert.ok(
+    (engine.getSnapshot(1059).board[0][2] as BlockCell).state === "idle",
+    "the match still waits for the short block's landing tick",
+  );
+  engine.drainEvents();
+
+  engine.update(1060);
+  const snapshot = engine.getSnapshot(1060);
+  assert.equal((snapshot.board[0][0] as BlockCell).state, "clearing");
+  assert.equal((snapshot.board[0][1] as BlockCell).state, "clearing");
+  assert.equal((snapshot.board[0][2] as BlockCell).state, "clearing");
+  assert.ok(
+    (snapshot.board[0][5] as BlockCell).animationStarted !== undefined,
+    "the unrelated block remains in flight until its own deadline",
+  );
+  assert.deepEqual(
+    engine.drainEvents().filter((event) => (
+      event.type === "block-land" || event.type === "clear"
+    )),
+    [
+      { type: "block-land", count: 1 },
+      { type: "clear", magnitude: 3, gray: false },
+    ],
+  );
+});
+
 test("a one-row hanging block keeps its reserved landing cell unswappable", () => {
   const engine = new CrackAttackEngine({ seed: 0x929191 });
   const internals = harness(engine);
@@ -2017,6 +2137,76 @@ test("a quick raise tap commits the stack to the next complete row", () => {
     engine.getSnapshot(now + 20).rise < 0.01,
     "ordinary slow creep resumes after the committed row",
   );
+});
+
+test("Creep ignores a raise tap contained inside a clearing phase", () => {
+  const createClearingEngine = (seed: number) => {
+    const engine = new CrackAttackEngine({ seed });
+    const internals = harness(engine);
+    const board = createEmptyBoard();
+    board[0][0] = block(seed + 1, 2);
+    board[0][1] = block(seed + 2, 2);
+    board[0][2] = block(seed + 3, 2);
+    internals.board = board;
+    internals.status = "playing";
+    internals.phase = "idle";
+    internals.lastUpdate = 1000;
+    internals.startClear(
+      [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }],
+      false,
+      1000,
+    );
+    engine.drainEvents();
+    return { engine, internals };
+  };
+
+  const tapped = createClearingEngine(0x746170);
+  const initialCursorY = tapped.engine.getSnapshot(1000).cursorY;
+  tapped.engine.setRaiseHeld(true);
+  tapped.engine.setRaiseHeld(false);
+  assert.equal(tapped.internals.raiseToRowBoundary, false);
+  tapped.engine.update(1000 + BLOCK_CLEAR_DURATION_MS + 500);
+  assert.equal(
+    tapped.engine.getSnapshot(1000 + BLOCK_CLEAR_DURATION_MS + 500).cursorY,
+    initialCursorY,
+    "a released command never becomes a delayed full-row raise",
+  );
+
+  const held = createClearingEngine(0x68656c64);
+  held.engine.setRaiseHeld(true);
+  held.engine.update(1000 + BLOCK_CLEAR_DURATION_MS);
+  assert.equal(held.internals.raiseToRowBoundary, true);
+  held.engine.setRaiseHeld(false);
+  held.engine.update(1000 + BLOCK_CLEAR_DURATION_MS + 500);
+  assert.equal(
+    held.engine.getSnapshot(1000 + BLOCK_CLEAR_DURATION_MS + 500).cursorY,
+    initialCursorY + 1,
+    "a command still held when Creep resumes is sampled normally",
+  );
+});
+
+test("Creep ignores a raise tap contained inside a danger freeze", () => {
+  const engine = new CrackAttackEngine({ seed: 0x66726565 });
+  const internals = harness(engine);
+  const board = createEmptyBoard();
+  board[VISIBLE_ROWS - 1][0] = block(570, 1);
+  internals.board = board;
+  internals.status = "playing";
+  internals.phase = "idle";
+  internals.lastUpdate = 1000;
+
+  engine.update(1020);
+  const initialCursorY = engine.getSnapshot(1020).cursorY;
+  assert.equal(internals.dangerActive, true);
+  engine.setRaiseHeld(true);
+  engine.setRaiseHeld(false);
+  assert.equal(internals.raiseToRowBoundary, false);
+
+  internals.board[VISIBLE_ROWS - 1][0] = null;
+  engine.update(1540);
+  const snapshot = engine.getSnapshot(1540);
+  assert.equal(snapshot.dangerActive, false);
+  assert.equal(snapshot.cursorY, initialCursorY);
 });
 
 test("pausing does not cancel a manually committed creep row", () => {
