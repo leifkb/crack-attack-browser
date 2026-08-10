@@ -169,6 +169,13 @@ function playEvent(rig: AudioRig | null, event: GameEvent): void {
   if (event.type === "swap") {
     tone(rig, 240, 0.07, 0.02, 0, "square");
     tone(rig, 310, 0.06, 0.018, 0.045, "square");
+  } else if (event.type === "block-land") {
+    // The desktop plays one quiet landing sample per block. Closely spaced
+    // oscillator voices preserve the weight without clipping a large stack.
+    const voices = Math.min(6, event.count);
+    for (let index = 0; index < voices; index += 1) {
+      tone(rig, 155 + index * 7, 0.055, 0.008, index * 0.006, "triangle");
+    }
   } else if (event.type === "clear") {
     const root = event.gray ? 290 : 420;
     const notes = Math.min(6, Math.max(3, event.magnitude));
@@ -193,6 +200,9 @@ function playEvent(rig: AudioRig | null, event: GameEvent): void {
     tone(rig, 165, 0.2, 0.04, 0.28, "square");
   } else if (event.type === "rise") {
     tone(rig, 150, 0.08, 0.016, 0, "triangle");
+  } else if (event.type === "countdown-cue") {
+    // Sound::play uses volumes 10, 7, 4, and 1 for 3, 2, 1, and GO.
+    tone(rig, 540, 0.09, 0.004 * (1 + event.remaining * 3), 0, "square");
   } else if (event.type === "start") {
     tone(rig, 440, 0.12, 0.035, 0, "triangle");
     tone(rig, 660, 0.18, 0.035, 0.11, "triangle");
