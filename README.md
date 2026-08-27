@@ -36,7 +36,12 @@ npm ci
 npm run dev
 ```
 
-Run the simulation and rendering regression tests with `npm run test:engine`.
+Run the clean-checkout test suite with `npm test`. It exercises the simulation
+and renderer, then builds and validates the static GitHub Pages artifact.
+
+The environment-specific Sites build remains available as `npm run test:sites`.
+It requires the environment-owned `.openai/hosting.json` manifest and verifies
+the rendered worker output.
 
 ## GitHub Pages
 
