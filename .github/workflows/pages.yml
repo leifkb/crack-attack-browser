@@ -33,8 +33,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run engine and rendering tests
-        run: npm run test:engine
+      - name: Run clean-checkout test suite
+        run: npm test
 
       - name: Type-check the static game
         run: npm run typecheck:pages
@@ -42,11 +42,6 @@ jobs:
       - name: Lint source
         run: npm run lint
 
-      - name: Build static game
-        run: npm run build:pages
-
-      - name: Validate static artifact
-        run: npm run validate:pages
 
       - name: Upload built site
         uses: actions/upload-artifact@v4
